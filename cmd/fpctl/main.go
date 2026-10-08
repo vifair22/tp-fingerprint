@@ -13,6 +13,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/user"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,6 +66,8 @@ func init() {
 		{"fetch-firmware", "extract the sensor firmware from Lenovo's driver package", fetchFirmwareUsage, runFetchFirmware},
 		{"upload-firmware", "write the firmware to a paired sensor", uploadFirmwareUsage, runUploadFirmware},
 		{"calibrate", "calibrate the sensor and store the result", calibrateUsage, runCalibrate},
+		{"list", "list enrolled users and fingers", listUsage, runList},
+		{"delete", "delete a user's enrolled fingers", deleteUsage, runDelete},
 		{"version", "print the version", "usage: fpctl version\n", runVersion},
 		{"help", "show help for a command", "usage: fpctl help [command]\n", runHelp},
 	}
@@ -468,6 +472,180 @@ func runCalibrate(e *env, args []string) error {
 		}
 		fmt.Fprintf(e.stdout, "calibrated %s; saved %s\n", where, *calibPath)
 		return nil
+	})
+}
+
+// openSession opens the paired sensor's session with the secret at path
+// and runs fn over it.
+func openSession(e *env, args sessionArgs, fn func(sess *validity.Session, where string) error) error {
+	secret, err := hostid.Load(args.secret)
+	if err != nil {
+		return err
+	}
+	log := newLogger(e.stderr, args.trace)
+	return withSensor(e, log, func(l *validity.Link, where string) error {
+		sess, err := validity.Open(l, validity.DeriveHostKeys(secret), e.fwKey)
+		if err != nil {
+			return err
+		}
+		return fn(sess, where)
+	})
+}
+
+type sessionArgs struct {
+	secret string
+	trace  bool
+}
+
+func (a *sessionArgs) register(fs *flag.FlagSet) {
+	fs.StringVar(&a.secret, "secret", hostid.DefaultPath, "")
+	fs.BoolVar(&a.trace, "trace", false, "")
+}
+
+// lookupUser resolves a user name or numeric uid.
+func lookupUser(name string) (uint32, string, error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		if u, err = user.LookupId(name); err != nil {
+			return 0, "", fmt.Errorf("no such user %q", name)
+		}
+	}
+	uid, err := strconv.ParseUint(u.Uid, 10, 32)
+	if err != nil {
+		return 0, "", err
+	}
+	return uint32(uid), u.Username, nil
+}
+
+// describeSID names the user a SID stands for where it can.
+func describeSID(sid validity.SID) string {
+	uid, ok := sid.UID()
+	if !ok {
+		return sid.String()
+	}
+	if u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil {
+		return fmt.Sprintf("%s (uid %d)", u.Username, uid)
+	}
+	return fmt.Sprintf("uid %d", uid)
+}
+
+const listUsage = `usage: fpctl list [--secret PATH] [--trace]
+
+Lists the users and fingers enrolled in the sensor's database, with the
+database's size and usage. Changes nothing.
+
+  --secret PATH   host secret (default ` + hostid.DefaultPath + `)
+  --trace         log every command and reply in hex to stderr
+`
+
+func runList(e *env, args []string) error {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	var sa sessionArgs
+	sa.register(fs)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	return openSession(e, sa, func(sess *validity.Session, _ string) error {
+		db := validity.NewDB(sess)
+		info, err := db.Info()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(e.stdout, "database  %d bytes, %d used, %d free, %d records\n",
+			info.Total, info.Used, info.Free, info.Records)
+		stg, err := db.Storage()
+		if errors.Is(err, validity.ErrNoStorage) {
+			fmt.Fprintln(e.stdout, "no users enrolled (the user storage does not exist yet)")
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		users, err := db.Users(stg)
+		if err != nil {
+			return err
+		}
+		if len(users) == 0 {
+			fmt.Fprintln(e.stdout, "no users enrolled")
+		}
+		for _, u := range users {
+			fmt.Fprintf(e.stdout, "user  %s, record %d\n", describeSID(u.SID), u.ID)
+			for _, f := range u.Fingers {
+				fmt.Fprintf(e.stdout, "  %-20s record %d\n", validity.FingerName(f.Subtype), f.ID)
+			}
+		}
+		return nil
+	})
+}
+
+const deleteUsage = `usage: fpctl delete --user NAME [--finger FINGER] [--secret PATH] [--trace]
+
+Deletes one enrolled finger of a user, or with no --finger the user's
+record and every finger under it. FINGER is an fprintd name such as
+right-index-finger.
+
+  --user NAME       user name or uid
+  --finger FINGER   the finger to delete
+  --secret PATH     host secret (default ` + hostid.DefaultPath + `)
+  --trace           log every command and reply in hex to stderr
+`
+
+func runDelete(e *env, args []string) error {
+	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
+	name := fs.String("user", "", "")
+	finger := fs.String("finger", "", "")
+	var sa sessionArgs
+	sa.register(fs)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return &usageError{"--user is required"}
+	}
+	var subtype uint16
+	if *finger != "" {
+		var ok bool
+		if subtype, ok = validity.FingerSubtype(*finger); !ok {
+			return &usageError{fmt.Sprintf("unknown finger %q", *finger)}
+		}
+	}
+	uid, username, err := lookupUser(*name)
+	if err != nil {
+		return err
+	}
+	return openSession(e, sa, func(sess *validity.Session, _ string) error {
+		db := validity.NewDB(sess)
+		stg, err := db.Storage()
+		if errors.Is(err, validity.ErrNoStorage) {
+			return fmt.Errorf("%s has nothing enrolled", username)
+		}
+		if err != nil {
+			return err
+		}
+		u, err := db.LookupUser(stg.ID, validity.UIDSID(uid))
+		if err != nil {
+			return err
+		}
+		if u == nil {
+			return fmt.Errorf("%s has nothing enrolled", username)
+		}
+		if *finger == "" {
+			if err := db.DeleteRecord(u.ID); err != nil {
+				return err
+			}
+			fmt.Fprintf(e.stdout, "deleted %s and %d enrolled finger(s)\n", username, len(u.Fingers))
+			return nil
+		}
+		for _, f := range u.Fingers {
+			if f.Subtype == subtype {
+				if err := db.DeleteRecord(f.ID); err != nil {
+					return err
+				}
+				fmt.Fprintf(e.stdout, "deleted %s's %s\n", username, *finger)
+				return nil
+			}
+		}
+		return fmt.Errorf("%s has no %s enrolled", username, *finger)
 	})
 }
 

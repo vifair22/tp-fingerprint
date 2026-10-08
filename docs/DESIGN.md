@@ -2,9 +2,9 @@
 
 Status: **sensor paired, firmware loaded, calibrated** (2026-10-07).
 Transport, probe, TLS session, pairing, firmware fetch and upload,
-calibration and factory reset are written; all but factory reset have run
-against the real sensor. Next: the sensor's database (`db.py`), then
-capture, enroll and identify. This file records the
+calibration, the sensor's database layer and factory reset are written;
+all but factory reset have run against the real sensor. Next: capture,
+enroll and identify. This file records the
 decisions made before the first line was written, so the implementation
 starts from them rather than rediscovering them, and what the real sensor
 has shown since.
@@ -156,6 +156,22 @@ exactly (3 x 224 + 1) x 120 = 80,760 bytes, the line count the command
 asks for. The 13,440-byte calibration data averages +0.52 as signed
 corrections (range -37 to +111). A second run found everything current
 and captured nothing.
+
+## The sensor's database (2026-10-07)
+
+Ported from `db.py` and `sid.py`: storage, user and finger records,
+lookup by identity, record values and children, create (inside a flash
+transaction) and delete. Users are keyed by the reference's uid mapping,
+`S-1-5-21-111111111-1111111111-1111111111-<uid>`, padded to the 0x4c-byte
+Windows identity union. Deleting a user record deletes its fingers; a
+single finger is deleted by its own record, which the reference never
+does but the System Settings phase needs.
+
+Unlike the reference, which creates the `StgWindsor` storage at every
+start, the storage is created on first enrollment, so `fpctl list` writes
+nothing. On the real sensor (still empty) `45` reported 524,288 bytes,
+partition 4's size, with 512 used and no records, and the storage lookup
+answered `0x04b3` (not found).
 
 ## Pairing identity (decided 2026-10-07)
 

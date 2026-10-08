@@ -34,6 +34,8 @@ type simSensor struct {
 	// the data endpoint's reply to each.
 	captures [][]byte
 	frames   func() []byte
+	// db is the sensor's record store; see db_test.go.
+	db       *simDB
 	cmds     []string
 	rebooted int
 }
@@ -122,6 +124,8 @@ func (s *simSensor) sessionCmd(req []byte) []byte {
 		return concat(ok, s.factoryBits())
 	case 0x40:
 		return concat(ok, s.readFlash(req))
+	case 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b:
+		return s.dbCmd(req)
 	case 0x1a:
 		return []byte{0x91, 0x04} // nothing to commit
 	case 0x3f:

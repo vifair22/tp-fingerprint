@@ -6,12 +6,17 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"git.airies.net/vifair22/t480-fingerprint/internal/validity"
 )
 
 // replaySensor answers each command with the next canned reply, which is
@@ -477,5 +482,66 @@ func TestCalibrateCommandErrors(t *testing.T) {
 				t.Fatalf("exit %d, stderr %q, want %q", code, errOut, tt.want)
 			}
 		})
+	}
+}
+
+func TestListAndDeleteArgs(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "secret")
+	os.WriteFile(secret, make([]byte, 32), 0o600)
+	me, err := user.Current()
+	if err != nil {
+		t.Skip(err)
+	}
+	tests := []struct {
+		name string
+		args []string
+		s    *replaySensor
+		want string
+	}{
+		{"list missing secret", []string{"list", "--secret", filepath.Join(dir, "nope")}, nil, "host secret"},
+		{"list unpaired", []string{"list", "--secret", secret}, &replaySensor{replies: []string{flashUnpartitioned}}, "not paired"},
+		{"list extra argument", []string{"list", "x"}, nil, "usage: fpctl list"},
+		{"delete without user", []string{"delete"}, nil, "--user is required"},
+		{"delete unknown finger", []string{"delete", "--user", me.Username, "--finger", "nose"}, nil, "unknown finger"},
+		{"delete unknown user", []string{"delete", "--user", "no-such-user-here"}, nil, "no such user"},
+		{"delete unpaired", []string{"delete", "--user", me.Uid, "--secret", secret},
+			&replaySensor{replies: []string{flashUnpartitioned}}, "not paired"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var open func() (sensor, string, error)
+			if tt.s != nil {
+				open = opener(tt.s)
+			}
+			code, _, errOut := runWith(t, open, tt.args...)
+			if code != 1 || !strings.Contains(errOut, tt.want) {
+				t.Fatalf("exit %d, stderr %q, want %q", code, errOut, tt.want)
+			}
+		})
+	}
+}
+
+func TestUserResolution(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Skip(err)
+	}
+	for _, name := range []string{me.Username, me.Uid} {
+		uid, username, err := lookupUser(name)
+		if err != nil || strconv.FormatUint(uint64(uid), 10) != me.Uid || username != me.Username {
+			t.Errorf("%s: %d %s %v", name, uid, username, err)
+		}
+	}
+	uid, _ := strconv.ParseUint(me.Uid, 10, 32)
+	if got := describeSID(validity.UIDSID(uint32(uid))); got != fmt.Sprintf("%s (uid %d)", me.Username, uid) {
+		t.Errorf("describe %q", got)
+	}
+	if got := describeSID(validity.UIDSID(4000000000)); got != "uid 4000000000" {
+		t.Errorf("unknown uid %q", got)
+	}
+	other := validity.SID{Revision: 1, Auth: 5, SubAuth: []uint32{18}}
+	if got := describeSID(other); got != "S-1-5-18" {
+		t.Errorf("foreign sid %q", got)
 	}
 }
