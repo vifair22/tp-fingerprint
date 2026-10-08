@@ -5,8 +5,9 @@ Fingerprint authentication for the ThinkPad T480's Synaptics `06cb:009a`
 module, and a CLI. It replaces the python-validity / open-fprintd /
 fprintd-clients stack with one program of our own.
 
-Status: working end to end against the real sensor, installed locally on
-the T480 and unlocking the Plasma lock screen; the ebuild is next. See [docs/DESIGN.md](docs/DESIGN.md) for
+Status: working end to end on the T480 it was written for: the lock
+screen, polkit (1Password) and enrollment from System Settings, installed
+locally (there is no package, by design). See [docs/DESIGN.md](docs/DESIGN.md) for
 the decisions, the scope of v1, and the facts taken from the reference
 implementation.
 
@@ -25,7 +26,7 @@ make debug race # debug and race-detector builds of the Go programs
 make pamcheck   # build/bin/pamcheck, to try the module without /etc/pam.d
 ```
 
-## Installing (locally, until the ebuild exists)
+## Installing
 
 ```sh
 make                 # as yourself
