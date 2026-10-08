@@ -33,6 +33,12 @@ type tlsSensor struct {
 	flights int
 
 	suite uint16
+	// hostPub checks CertificateVerify; pairing replaces it with the key
+	// the host certified.
+	hostPub *ecdsa.PublicKey
+	// plain answers commands outside the session; nil treats every
+	// non-handshake command as application data.
+	plain func(req []byte) []byte
 	// reply answers a decrypted command; nil echoes it after a 0000
 	// status.
 	reply func(req []byte) []byte
@@ -44,7 +50,14 @@ type tlsSensor struct {
 }
 
 func newTLSSensor(t *testing.T) *tlsSensor {
-	return &tlsSensor{t: t, f: newPairingFixture(t), hs: sha256.New(), suite: suiteECDHECDSAAES256}
+	f := newPairingFixture(t)
+	return &tlsSensor{t: t, f: f, hs: sha256.New(), suite: suiteECDHECDSAAES256, hostPub: &f.host.PublicKey}
+}
+
+// endSession forgets the session, as a sensor reboot does.
+func (s *tlsSensor) endSession() {
+	s.hs = sha256.New()
+	s.clientRandom, s.serverRandom, s.master = nil, nil, nil
 }
 
 func (s *tlsSensor) pairing(t *testing.T) *Pairing {
@@ -67,6 +80,8 @@ func (s *tlsSensor) Bulk(ep uint8, buf []byte, _ time.Duration) (int, error) {
 		rsp = s.firstFlight(buf[4:])
 	case bytes.HasPrefix(buf, handshakePrefix):
 		rsp = s.secondFlight(buf[4:])
+	case s.plain != nil && (s.master == nil || buf[0] != recAppData):
+		rsp = s.plain(buf)
 	default:
 		rsp = s.appData(buf)
 	}
@@ -159,7 +174,7 @@ func (s *tlsSensor) secondFlight(b []byte) []byte {
 			kb := prf(s.master, concat([]byte("key expansion"), seed), 0x120)
 			s.signKey, s.validationKey, s.encKey, s.decKey = kb[0:32], kb[32:64], kb[64:96], kb[96:128]
 		case hsCertVerify:
-			if !ecdsa.VerifyASN1(&s.f.host.PublicKey, s.hs.Sum(nil), body) {
+			if !ecdsa.VerifyASN1(s.hostPub, s.hs.Sum(nil), body) {
 				s.t.Error("sensor: CertificateVerify does not verify")
 			}
 		default:

@@ -2,6 +2,7 @@
 package main
 
 import (
+	"crypto/ecdsa"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"git.airies.net/vifair22/t480-fingerprint/internal/hostid"
 	"git.airies.net/vifair22/t480-fingerprint/internal/usbfs"
 	"git.airies.net/vifair22/t480-fingerprint/internal/validity"
 	"git.airies.net/vifair22/t480-fingerprint/internal/version"
@@ -29,6 +31,8 @@ type env struct {
 	// open finds and opens the sensor, returning a description of where
 	// it was found for the report.
 	open func() (sensor, string, error)
+	// fwKey verifies the sensor's ECDH key; tests swap in their own.
+	fwKey *ecdsa.PublicKey
 }
 
 type command struct {
@@ -43,6 +47,9 @@ var commands []command
 func init() {
 	commands = []command{
 		{"probe", "read the sensor's state without changing it", probeUsage, runProbe},
+		{"pair", "format an unpaired sensor and pair it with this host", pairUsage, runPair},
+		{"status", "open a paired sensor's encrypted session", statusUsage, runStatus},
+		{"factory-reset", "wipe the sensor's pairing and enrolled prints", factoryResetUsage, runFactoryReset},
 		{"version", "print the version", "usage: fpctl version\n", runVersion},
 		{"help", "show help for a command", "usage: fpctl help [command]\n", runHelp},
 	}
@@ -63,7 +70,7 @@ type usageError struct{ msg string }
 func (u *usageError) Error() string { return u.msg }
 
 func main() {
-	e := &env{stdout: os.Stdout, stderr: os.Stderr, open: openSystemSensor}
+	e := &env{stdout: os.Stdout, stderr: os.Stderr, open: openSystemSensor, fwKey: validity.FirmwarePublicKey()}
 	os.Exit(run(e, os.Args[1:]))
 }
 
@@ -159,25 +166,159 @@ func runProbe(e *env, args []string) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
+	log := newLogger(e.stderr, *trace)
+	return withSensor(e, log, func(l *validity.Link, where string) error {
+		r, err := validity.Probe(l)
+		if err != nil {
+			return err
+		}
+		writeReport(e.stdout, where, r)
+		return nil
+	})
+}
+
+func newLogger(w io.Writer, trace bool) *slog.Logger {
 	level := slog.LevelInfo
-	if *trace {
+	if trace {
 		level = slog.LevelDebug
 	}
-	log := slog.New(slog.NewTextHandler(e.stderr, &slog.HandlerOptions{Level: level}))
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
+}
 
+// withSensor opens the sensor, runs fn over a link to it, and closes it
+// whatever fn returned.
+func withSensor(e *env, log *slog.Logger, fn func(l *validity.Link, where string) error) error {
 	dev, where, err := e.open()
 	if err != nil {
 		return err
 	}
-	r, perr := validity.Probe(validity.NewLink(dev, log))
+	ferr := fn(validity.NewLink(dev, log), where)
 	if cerr := dev.Close(); cerr != nil {
 		log.Warn("closing sensor", "err", cerr)
 	}
-	if perr != nil {
-		return perr
+	return ferr
+}
+
+const pairUsage = `usage: fpctl pair [--secret PATH] [--trace]
+
+Formats the sensor's flash and pairs it with this host, binding the pairing
+to the host secret at PATH (created if absent, never replaced). Refuses a
+sensor that already has a partition table: run fpctl factory-reset first
+for those. If pairing fails after it has formatted the flash, the sensor is
+left partitioned without keys, and fpctl factory-reset recovers it too. The sensor reboots at the end and reappears on the bus a moment
+later; check the result with fpctl status.
+
+The host secret must be backed up: without it the pairing cannot be
+opened, and the only way back is a factory reset and re-enrolling.
+
+  --secret PATH   host secret (default ` + hostid.DefaultPath + `)
+  --trace         log every command and reply in hex to stderr
+`
+
+func runPair(e *env, args []string) error {
+	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
+	secretPath := fs.String("secret", hostid.DefaultPath, "")
+	trace := fs.Bool("trace", false, "")
+	if err := parseFlags(fs, args); err != nil {
+		return err
 	}
-	writeReport(e.stdout, where, r)
-	return nil
+	log := newLogger(e.stderr, *trace)
+	return withSensor(e, log, func(l *validity.Link, where string) error {
+		// Refuse before creating a secret that would then pair nothing.
+		fi, err := validity.GetFlashInfo(l)
+		if err != nil {
+			return err
+		}
+		if len(fi.Partitions) > 0 {
+			return validity.ErrAlreadyPartitioned
+		}
+		secret, created, err := hostid.LoadOrCreate(*secretPath)
+		if err != nil {
+			return err
+		}
+		if created {
+			log.Info("created host secret; back it up", "path", *secretPath)
+		}
+		if err := validity.Pair(l, validity.DeriveHostKeys(secret), e.fwKey); err != nil {
+			return err
+		}
+		fmt.Fprintf(e.stdout, "paired %s; the sensor is rebooting, check it with fpctl status\n", where)
+		return nil
+	})
+}
+
+const factoryResetUsage = `usage: fpctl factory-reset --yes [--trace]
+
+Wipes the sensor's pairing and every print enrolled on it, and reboots it.
+This is the recovery path for a sensor paired elsewhere or left half-paired;
+afterwards it can be paired again with fpctl pair. The host secret is not
+touched. Without --yes nothing is sent.
+
+  --yes     confirm the wipe
+  --trace   log every command and reply in hex to stderr
+`
+
+func runFactoryReset(e *env, args []string) error {
+	fs := flag.NewFlagSet("factory-reset", flag.ContinueOnError)
+	yes := fs.Bool("yes", false, "")
+	trace := fs.Bool("trace", false, "")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if !*yes {
+		return &usageError{"refusing to wipe the sensor without --yes"}
+	}
+	log := newLogger(e.stderr, *trace)
+	return withSensor(e, log, func(l *validity.Link, where string) error {
+		if err := validity.FactoryReset(l); err != nil {
+			return err
+		}
+		fmt.Fprintf(e.stdout, "reset %s; the sensor is rebooting\n", where)
+		return nil
+	})
+}
+
+const statusUsage = `usage: fpctl status [--secret PATH] [--trace]
+
+Opens the paired sensor as fpd does: sends the start-up programs, reads
+the pairing back from the TLS partition, and runs the handshake. Prints the
+flash layout, firmware state and ROM version read over the session.
+
+  --secret PATH   host secret (default ` + hostid.DefaultPath + `)
+  --trace         log every command and reply in hex to stderr
+`
+
+func runStatus(e *env, args []string) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	secretPath := fs.String("secret", hostid.DefaultPath, "")
+	trace := fs.Bool("trace", false, "")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	secret, err := hostid.Load(*secretPath)
+	if err != nil {
+		return err
+	}
+	log := newLogger(e.stderr, *trace)
+	return withSensor(e, log, func(l *validity.Link, where string) error {
+		sess, err := validity.Open(l, validity.DeriveHostKeys(secret), e.fwKey)
+		if err != nil {
+			return err
+		}
+		var r validity.Report
+		if r.Flash, err = validity.GetFlashInfo(sess); err != nil {
+			return err
+		}
+		if r.Rom, err = validity.GetRomInfo(sess); err != nil {
+			return err
+		}
+		if r.Fwext, r.FwextStatus, err = validity.GetFirmwareInfo(sess, validity.PartitionFwext); err != nil {
+			return err
+		}
+		fmt.Fprintln(e.stdout, "session  open")
+		writeReport(e.stdout, where, r)
+		return nil
+	})
 }
 
 func openSystemSensor() (sensor, string, error) {
@@ -214,7 +355,9 @@ func writeReport(w io.Writer, where string, r validity.Report) {
 		}
 	}
 
-	fmt.Fprintf(w, "cmd 0x19 %s\n", hexOrEmpty(r.Cmd19))
+	if r.Cmd19 != nil {
+		fmt.Fprintf(w, "cmd 0x19 %s\n", hexOrEmpty(r.Cmd19))
+	}
 
 	if r.Fwext == nil {
 		fmt.Fprintf(w, "fwext    not loaded (%s)\n", r.FwextStatus)

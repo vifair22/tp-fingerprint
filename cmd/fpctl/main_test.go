@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -176,4 +178,121 @@ func TestUnformattedFlashReport(t *testing.T) {
 			t.Errorf("report lacks %q:\n%s", want, out)
 		}
 	}
+}
+
+const (
+	flashUnpartitioned = "0000c800400000101000000101000000"
+	flashPartitioned   = "0000c80040000010100000010100" + "0100" + "010407000010000000100000"
+)
+
+func TestPairRefusesPartitionedSensor(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "host-secret")
+	s := &replaySensor{replies: []string{flashPartitioned}}
+	code, _, errOut := runWith(t, opener(s), "pair", "--secret", secret)
+	if code != 1 || !strings.Contains(errOut, "already partitioned") {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	if _, err := os.Stat(secret); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("secret created for a sensor that was not paired: %v", err)
+	}
+}
+
+func TestPairCreatesSecretThenReportsSensorFailure(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "fpd", "host-secret")
+	// Pair re-reads the flash info, then send_init's first command fails.
+	s := &replaySensor{replies: []string{flashUnpartitioned, flashUnpartitioned, "0100"}}
+	code, _, errOut := runWith(t, opener(s), "pair", "--secret", secret)
+	if code != 1 || !strings.Contains(errOut, "start-up") || !strings.Contains(errOut, "back it up") {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	if _, err := os.Stat(secret); err != nil {
+		t.Fatalf("secret not created: %v", err)
+	}
+}
+
+func TestPairErrors(t *testing.T) {
+	t.Run("flash info", func(t *testing.T) {
+		s := &replaySensor{replies: []string{"0100"}}
+		if code, _, _ := runWith(t, opener(s), "pair", "--secret", filepath.Join(t.TempDir(), "s")); code != 1 {
+			t.Fatalf("exit %d", code)
+		}
+	})
+	t.Run("secret unusable", func(t *testing.T) {
+		dir := t.TempDir()
+		bad := filepath.Join(dir, "s")
+		if err := os.WriteFile(bad, []byte("short"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s := &replaySensor{replies: []string{flashUnpartitioned}}
+		code, _, errOut := runWith(t, opener(s), "pair", "--secret", bad)
+		if code != 1 || !strings.Contains(errOut, "5 bytes") {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+	})
+	t.Run("bad flag", func(t *testing.T) {
+		if code, _, errOut := runWith(t, nil, "pair", "extra"); code != 1 || !strings.Contains(errOut, "usage: fpctl pair") {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+	})
+}
+
+func TestStatus(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "host-secret")
+	t.Run("no secret", func(t *testing.T) {
+		code, _, errOut := runWith(t, nil, "status", "--secret", secret)
+		if code != 1 || !strings.Contains(errOut, "no such file") {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+	})
+	if err := os.WriteFile(secret, make([]byte, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("unpaired sensor", func(t *testing.T) {
+		s := &replaySensor{replies: []string{flashUnpartitioned}}
+		code, _, errOut := runWith(t, opener(s), "status", "--secret", secret)
+		if code != 1 || !strings.Contains(errOut, "not paired") {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+	})
+	t.Run("open failure", func(t *testing.T) {
+		code, _, errOut := runWith(t, nil, "status", "--secret", secret)
+		if code != 1 || !strings.Contains(errOut, "no sensor") {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+	})
+	t.Run("bad flag", func(t *testing.T) {
+		if code, _, _ := runWith(t, nil, "status", "--nope"); code != 1 {
+			t.Fatalf("exit %d", code)
+		}
+	})
+}
+
+func TestFactoryResetCommand(t *testing.T) {
+	t.Run("needs --yes", func(t *testing.T) {
+		opened := false
+		open := func() (sensor, string, error) { opened = true; return nil, "", errors.New("x") }
+		code, _, errOut := runWith(t, open, "factory-reset")
+		if code != 1 || !strings.Contains(errOut, "without --yes") || opened {
+			t.Fatalf("exit %d, opened %v, stderr %q", code, opened, errOut)
+		}
+	})
+	t.Run("wipes", func(t *testing.T) {
+		s := &replaySensor{replies: []string{"0000", "0000", "0000"}}
+		code, out, errOut := runWith(t, opener(s), "factory-reset", "--yes")
+		if code != 0 || !strings.Contains(out, "reset fake") || !s.closed {
+			t.Fatalf("exit %d, stdout %q, stderr %q", code, out, errOut)
+		}
+	})
+	t.Run("sensor refuses", func(t *testing.T) {
+		s := &replaySensor{replies: []string{"0100"}}
+		if code, _, errOut := runWith(t, opener(s), "factory-reset", "--yes"); code != 1 || !strings.Contains(errOut, "reset program") {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+	})
+	t.Run("bad flag", func(t *testing.T) {
+		if code, _, _ := runWith(t, nil, "factory-reset", "--nope"); code != 1 {
+			t.Fatalf("exit %d", code)
+		}
+	})
 }

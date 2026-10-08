@@ -1,7 +1,8 @@
 # t480-fingerprint design
 
-Status: **transport, probe and TLS session written** (2026-10-07; the
-session is tested against a fake sensor only, since this one is unpaired). This file records the
+Status: **sensor paired** (2026-10-07). Transport, probe, TLS session,
+pairing and factory reset are written; pairing and the session have run
+against the real sensor. Factory reset is tested against fakes only. This file records the
 decisions made before the first line was written, so the implementation
 starts from them rather than rediscovering them, and what the real sensor
 has shown since.
@@ -83,6 +84,25 @@ first writes (`3e`, `01`, `19`, `43 02`) and reported:
 - Command `0x19`'s reply is not constant between runs (bytes around offset
   0x1a change), so it probably holds a counter or a nonce. Its meaning is
   still unknown.
+
+## First pairing (2026-10-07)
+
+`fpctl pair` on the unpartitioned sensor, in the #272 order (send_init,
+then `reset_blob`, then `4f`), succeeded on the first run with no busy
+replies. What it showed:
+
+- The sensor's ECDH key from `50` verifies against the Synaptics key in
+  the reference, and the handshake completes with fixed 32-byte
+  ClientKeyExchange coordinates.
+- The certificate `4f` returns (stored as TLS block 3) is 0xb8 bytes and
+  is our own key structure from the host certificate, echoed back.
+- After the reboot the device re-enumerated (address 3 to 5), as #281
+  describes; finding it fresh on each open covers that.
+- `43 02` now answers `0x04b0` (no firmware) where it answered `0x04af`
+  before partitioning, which confirms `0x04af` as "no such partition".
+- After formatting, the flash header's first unknown field went from
+  `0x0010` to `0x0001`, and the ROM info's last byte from 0 to 2. Neither
+  is understood.
 
 ## Pairing identity (decided 2026-10-07)
 
