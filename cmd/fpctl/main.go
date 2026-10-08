@@ -2,16 +2,21 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"git.airies.net/vifair22/t480-fingerprint/internal/fwfetch"
 	"git.airies.net/vifair22/t480-fingerprint/internal/hostid"
 	"git.airies.net/vifair22/t480-fingerprint/internal/usbfs"
 	"git.airies.net/vifair22/t480-fingerprint/internal/validity"
@@ -33,6 +38,11 @@ type env struct {
 	open func() (sensor, string, error)
 	// fwKey verifies the sensor's ECDH key; tests swap in their own.
 	fwKey *ecdsa.PublicKey
+	// installerSHA512 and firmwareSHA256 pin the driver package and the
+	// file extracted from it; tests swap in their own.
+	installerSHA512 string
+	firmwareSHA256  string
+	http            *http.Client
 }
 
 type command struct {
@@ -50,6 +60,8 @@ func init() {
 		{"pair", "format an unpaired sensor and pair it with this host", pairUsage, runPair},
 		{"status", "open a paired sensor's encrypted session", statusUsage, runStatus},
 		{"factory-reset", "wipe the sensor's pairing and enrolled prints", factoryResetUsage, runFactoryReset},
+		{"fetch-firmware", "extract the sensor firmware from Lenovo's driver package", fetchFirmwareUsage, runFetchFirmware},
+		{"upload-firmware", "write the firmware to a paired sensor", uploadFirmwareUsage, runUploadFirmware},
 		{"version", "print the version", "usage: fpctl version\n", runVersion},
 		{"help", "show help for a command", "usage: fpctl help [command]\n", runHelp},
 	}
@@ -70,7 +82,13 @@ type usageError struct{ msg string }
 func (u *usageError) Error() string { return u.msg }
 
 func main() {
-	e := &env{stdout: os.Stdout, stderr: os.Stderr, open: openSystemSensor, fwKey: validity.FirmwarePublicKey()}
+	e := &env{
+		stdout: os.Stdout, stderr: os.Stderr, open: openSystemSensor,
+		fwKey:           validity.FirmwarePublicKey(),
+		installerSHA512: fwfetch.InstallerSHA512,
+		firmwareSHA256:  fwfetch.FirmwareSHA256,
+		http:            &http.Client{Timeout: 5 * time.Minute},
+	}
 	os.Exit(run(e, os.Args[1:]))
 }
 
@@ -274,6 +292,119 @@ func runFactoryReset(e *env, args []string) error {
 			return err
 		}
 		fmt.Fprintf(e.stdout, "reset %s; the sensor is rebooting\n", where)
+		return nil
+	})
+}
+
+// defaultFirmwarePath keeps the firmware beside the host secret.
+const defaultFirmwarePath = "/var/lib/fpd/" + validity.FirmwareName
+
+const fetchFirmwareUsage = `usage: fpctl fetch-firmware [--installer PATH] [--out PATH] [--innoextract PATH]
+
+Downloads Lenovo's driver package (` + fwfetch.InstallerURL + `),
+checks it against the pinned SHA-512, extracts ` + validity.FirmwareName + `
+with innoextract, checks that against its own pinned SHA-256, and installs
+it at the output path. The firmware is
+proprietary: it is fetched here and never redistributed.
+
+  --installer PATH    use a local copy of the package instead of downloading
+  --out PATH          where to install the firmware (default
+                      ` + defaultFirmwarePath + `)
+  --innoextract PATH  the innoextract to run (default: from PATH)
+`
+
+func runFetchFirmware(e *env, args []string) error {
+	fs := flag.NewFlagSet("fetch-firmware", flag.ContinueOnError)
+	installer := fs.String("installer", "", "")
+	out := fs.String("out", defaultFirmwarePath, "")
+	inno := fs.String("innoextract", "innoextract", "")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	work, err := os.MkdirTemp("", "fpctl-firmware-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(work)
+
+	if *installer == "" {
+		fmt.Fprintf(e.stderr, "downloading %s\n", fwfetch.InstallerURL)
+		if *installer, err = fwfetch.Download(ctx, e.http, fwfetch.InstallerURL, e.installerSHA512, work); err != nil {
+			return err
+		}
+	} else if err := fwfetch.Verify(*installer, e.installerSHA512); err != nil {
+		return err
+	}
+	fw, cleanup, err := fwfetch.Extract(ctx, *inno, *installer, validity.FirmwareName, work)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	data, err := os.ReadFile(fw)
+	if err != nil {
+		return err
+	}
+	if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != e.firmwareSHA256 {
+		return fmt.Errorf("extracted %s does not match the pinned SHA-256: got %x", validity.FirmwareName, sum)
+	}
+	if _, err := validity.ParseFwext(data); err != nil {
+		return err
+	}
+	if err := fwfetch.Install(fw, *out); err != nil {
+		return err
+	}
+	fmt.Fprintf(e.stdout, "installed %s (%d bytes, sha256 matches the pin)\n", *out, len(data))
+	return nil
+}
+
+const uploadFirmwareUsage = `usage: fpctl upload-firmware [--file PATH] [--secret PATH] [--trace]
+
+Opens the paired sensor and writes the firmware extension to its firmware
+partition, then reboots it. Does nothing if firmware is already loaded.
+
+  --file PATH     the firmware (default ` + defaultFirmwarePath + `)
+  --secret PATH   host secret (default ` + hostid.DefaultPath + `)
+  --trace         log every command and reply in hex to stderr
+`
+
+func runUploadFirmware(e *env, args []string) error {
+	fs := flag.NewFlagSet("upload-firmware", flag.ContinueOnError)
+	file := fs.String("file", defaultFirmwarePath, "")
+	secretPath := fs.String("secret", hostid.DefaultPath, "")
+	trace := fs.Bool("trace", false, "")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(*file)
+	if err != nil {
+		return fmt.Errorf("%w (run fpctl fetch-firmware first)", err)
+	}
+	fw, err := validity.ParseFwext(data)
+	if err != nil {
+		return err
+	}
+	secret, err := hostid.Load(*secretPath)
+	if err != nil {
+		return err
+	}
+	log := newLogger(e.stderr, *trace)
+	return withSensor(e, log, func(l *validity.Link, where string) error {
+		sess, err := validity.Open(l, validity.DeriveHostKeys(secret), e.fwKey)
+		if err != nil {
+			return err
+		}
+		fi, err := validity.UploadFirmware(sess, fw)
+		switch {
+		case errors.Is(err, validity.ErrFirmwareLoaded):
+			fmt.Fprintf(e.stdout, "firmware %d.%d (built %s) already loaded; nothing written\n",
+				fi.Major, fi.Minor, unixDate(fi.BuildTime))
+			return nil
+		case err != nil:
+			return err
+		}
+		fmt.Fprintf(e.stdout, "loaded firmware %d.%d (built %s, %d modules) on %s; the sensor is rebooting\n",
+			fi.Major, fi.Minor, unixDate(fi.BuildTime), len(fi.Modules), where)
 		return nil
 	})
 }

@@ -25,13 +25,17 @@ type simSensor struct {
 	ic    FlashIC
 	parts map[uint8][]byte // nil: not partitioned
 	// fail answers the named command with status 0x0001.
-	fail     string
+	fail string
+	// fwStatus is what register 0x80002080 reads; fwSigned is set once
+	// command 0x42 has accepted a signature.
+	fwStatus uint32
+	fwSigned bool
 	cmds     []string
 	rebooted int
 }
 
 func newSimSensor(t *testing.T) *simSensor {
-	s := &simSensor{t: t, tls: newTLSSensor(t), ic: flashICs[len(flashICs)-1]}
+	s := &simSensor{t: t, tls: newTLSSensor(t), ic: flashICs[len(flashICs)-1], fwStatus: 2}
 	s.tls.plain = s.plainCmd
 	s.tls.reply = s.sessionCmd
 	return s
@@ -115,11 +119,40 @@ func (s *simSensor) sessionCmd(req []byte) []byte {
 		s.parts[req[1]] = nil
 		return ok
 	case 0x41:
+		addr := int(binary.LittleEndian.Uint32(req[5:]))
 		size := binary.LittleEndian.Uint32(req[9:])
 		if int(size) != len(req)-13 {
 			s.t.Errorf("sim: write of %d bytes says %d", len(req)-13, size)
 		}
-		s.parts[req[1]] = append([]byte(nil), req[13:]...)
+		part := s.parts[req[1]]
+		if len(part) < addr+int(size) {
+			part = append(part, make([]byte, addr+int(size)-len(part))...)
+		}
+		copy(part[addr:], req[13:])
+		s.parts[req[1]] = part
+		return ok
+	case 0x43:
+		if s.fwSigned {
+			return unhex(s.t, fwextReply)
+		}
+		return []byte{0xb0, 0x04}
+	case 0x07:
+		if binary.LittleEndian.Uint32(req[1:]) != regFwextStatus {
+			s.t.Errorf("sim: read of register %x", req[1:5])
+		}
+		return binary.LittleEndian.AppendUint32(ok, s.fwStatus)
+	case 0x08:
+		if binary.LittleEndian.Uint32(req[1:]) != regFwextPrep || binary.LittleEndian.Uint32(req[5:]) != 7 {
+			s.t.Errorf("sim: register write %x", req[1:9])
+		}
+		return ok
+	case 0x75:
+		return concat(ok, make([]byte, 4), []byte{0x0a, 0x00, 0xdb, 0x00})
+	case 0x42:
+		if n := binary.LittleEndian.Uint16(req[3:]); int(n) != len(req)-5 || n != fwextSignatureLen {
+			s.t.Errorf("sim: signature of %d bytes says %d", len(req)-5, n)
+		}
+		s.fwSigned = true
 		return ok
 	case 0x05:
 		s.rebooted++

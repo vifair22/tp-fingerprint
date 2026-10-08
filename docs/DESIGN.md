@@ -1,8 +1,9 @@
 # t480-fingerprint design
 
-Status: **sensor paired** (2026-10-07). Transport, probe, TLS session,
-pairing and factory reset are written; pairing and the session have run
-against the real sensor. Factory reset is tested against fakes only. This file records the
+Status: **sensor paired, firmware loaded** (2026-10-07). Transport, probe,
+TLS session, pairing, firmware fetch and upload, and factory reset are
+written; all but factory reset have run against the real sensor. Next:
+enroll, identify, delete (the sensor's database, `db.py`). This file records the
 decisions made before the first line was written, so the implementation
 starts from them rather than rediscovering them, and what the real sensor
 has shown since.
@@ -103,6 +104,28 @@ replies. What it showed:
 - After formatting, the flash header's first unknown field went from
   `0x0010` to `0x0001`, and the ROM info's last byte from 0 to 2. Neither
   is understood.
+
+## First firmware upload (2026-10-07)
+
+`fpctl fetch-firmware` pulled `nz3gf07w.exe` (7,244,088 bytes, matching
+the reference's pinned SHA-512) and extracted `6_07f_lenovo_mis_qm.xpfwext`
+with innoextract 1.10-dev. The file is pinned too: 218,482 bytes, SHA-256
+`ed2b1b5818c4072dd5c1a66e5d556888e81e3806ab0fc653164bea823ccfa2b1`, header
+`FirmwareVersion = 6.07.0164` (the ROM is 6.7 build 164). It is a 20,210-byte
+text header ending in `0x1a`, a 198,016-byte image, and a 256-byte signature.
+
+`fpctl upload-firmware` then:
+
+- read 3 from register `0x80002080` after writing 7 to `0x8000205c`;
+- got major 0x190, minor 0x4a from identify (`75`);
+- wrote the image in 49 commands (48 x 0x1000, then 0x580), each
+  acknowledged with the length written; the signature was accepted;
+- read back firmware 1.2, built 2020-01-27, 8 modules, and rebooted.
+
+After the reboot (re-enumerated again, address 5 to 6) `fpctl status`
+opened a session at the first attempt and listed the same firmware. Its
+modules are the types and subtypes in the reference's annotated `43 02`
+reply, at newer versions.
 
 ## Pairing identity (decided 2026-10-07)
 

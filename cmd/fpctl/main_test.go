@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -295,4 +298,154 @@ func TestFactoryResetCommand(t *testing.T) {
 			t.Fatalf("exit %d", code)
 		}
 	})
+}
+
+// fetchEnv sets up a local installer pinned in the env and an innoextract
+// stand-in that writes a firmware file shaped like the real one (or, with
+// bad set, one without the header terminator).
+func fetchEnv(t *testing.T, bad bool) (installer, inno string, pin string) {
+	t.Helper()
+	dir := t.TempDir()
+	installer = filepath.Join(dir, "nz3gf07w.exe")
+	if err := os.WriteFile(installer, []byte("pretend installer"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := sha512.Sum512([]byte("pretend installer"))
+	pin = hex.EncodeToString(h[:])
+	header := `printf 'fwext header\x1a'`
+	if bad {
+		header = `printf 'no terminator'`
+	}
+	script := `#!/bin/bash
+while [ $# -gt 0 ]; do
+  case $1 in --output-dir) out=$2; shift ;; --include) inc=$2; shift ;; esac
+  shift
+done
+mkdir -p "$out/app"
+{ ` + header + `; head -c 1000 /dev/zero; } > "$out/app/$inc"
+`
+	inno = filepath.Join(dir, "innoextract")
+	if err := os.WriteFile(inno, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return installer, inno, pin
+}
+
+// fakeFirmwareSHA256 is the hash of what the innoextract stand-in writes.
+func fakeFirmwareSHA256(bad bool) string {
+	b := []byte("fwext header\x1a")
+	if bad {
+		b = []byte("no terminator")
+	}
+	h := sha256.Sum256(append(b, make([]byte, 1000)...))
+	return hex.EncodeToString(h[:])
+}
+
+func runFetch(t *testing.T, pin string, args ...string) (int, string, string) {
+	return runFetchPinned(t, pin, fakeFirmwareSHA256(false), args...)
+}
+
+func runFetchPinned(t *testing.T, pin, fwPin string, args ...string) (int, string, string) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	e := &env{stdout: &out, stderr: &errOut, installerSHA512: pin, firmwareSHA256: fwPin}
+	code := run(e, append([]string{"fetch-firmware"}, args...))
+	return code, out.String(), errOut.String()
+}
+
+func TestFetchFirmware(t *testing.T) {
+	installer, inno, pin := fetchEnv(t, false)
+	dst := filepath.Join(t.TempDir(), "fpd", "fw.xpfwext")
+	code, out, errOut := runFetch(t, pin, "--installer", installer, "--innoextract", inno, "--out", dst)
+	if code != 0 || !strings.Contains(out, "installed "+dst) || !strings.Contains(out, "matches the pin") {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, out, errOut)
+	}
+	if st, err := os.Stat(dst); err != nil || st.Size() != int64(len("fwext header\x1a")+1000) {
+		t.Fatalf("installed file: %v, %v", st, err)
+	}
+
+	t.Run("pin mismatch", func(t *testing.T) {
+		code, _, errOut := runFetch(t, strings.Repeat("0", 128), "--installer", installer, "--innoextract", inno)
+		if code != 1 || !strings.Contains(errOut, "pinned SHA-512") {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+	})
+	t.Run("not a firmware file", func(t *testing.T) {
+		installer, inno, pin := fetchEnv(t, true)
+		dst := filepath.Join(t.TempDir(), "fw")
+		code, _, errOut := runFetchPinned(t, pin, fakeFirmwareSHA256(true), "--installer", installer, "--innoextract", inno, "--out", dst)
+		if code != 1 || !strings.Contains(errOut, "no header terminator") {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+		if _, err := os.Stat(dst); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("a bad firmware file was installed")
+		}
+	})
+	t.Run("firmware pin mismatch", func(t *testing.T) {
+		dst := filepath.Join(t.TempDir(), "fw")
+		code, _, errOut := runFetchPinned(t, pin, strings.Repeat("0", 64), "--installer", installer, "--innoextract", inno, "--out", dst)
+		if code != 1 || !strings.Contains(errOut, "pinned SHA-256") {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+		if _, err := os.Stat(dst); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("an unpinned firmware file was installed")
+		}
+	})
+	t.Run("innoextract missing", func(t *testing.T) {
+		code, _, errOut := runFetch(t, pin, "--installer", installer, "--innoextract", filepath.Join(t.TempDir(), "x"))
+		if code != 1 || !strings.Contains(errOut, "innoextract") {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+	})
+	t.Run("download fails", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		failing := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("offline")
+		})}
+		e := &env{stdout: &out, stderr: &errOut, installerSHA512: pin, http: failing}
+		if code := run(e, []string{"fetch-firmware"}); code != 1 || !strings.Contains(errOut.String(), "offline") {
+			t.Fatalf("exit %d, stderr %q", code, errOut.String())
+		}
+	})
+	t.Run("bad flag", func(t *testing.T) {
+		if code, _, _ := runFetch(t, pin, "--nope"); code != 1 {
+			t.Fatalf("exit %d", code)
+		}
+	})
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestUploadFirmwareCommand(t *testing.T) {
+	dir := t.TempDir()
+	fw := filepath.Join(dir, "fw")
+	os.WriteFile(fw, append([]byte("hdr\x1a"), make([]byte, 1000)...), 0o600)
+	secret := filepath.Join(dir, "secret")
+	os.WriteFile(secret, make([]byte, 32), 0o600)
+	tests := []struct {
+		name string
+		args []string
+		s    *replaySensor
+		want string
+	}{
+		{"missing firmware", []string{"--file", filepath.Join(dir, "nope")}, nil, "fetch-firmware first"},
+		{"not firmware", []string{"--file", secret}, nil, "no header terminator"},
+		{"missing secret", []string{"--file", fw, "--secret", filepath.Join(dir, "nope")}, nil, "host secret"},
+		{"unpaired sensor", []string{"--file", fw, "--secret", secret}, &replaySensor{replies: []string{flashUnpartitioned}}, "not paired"},
+		{"bad flag", []string{"--nope"}, nil, "usage: fpctl upload-firmware"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var open func() (sensor, string, error)
+			if tt.s != nil {
+				open = opener(tt.s)
+			}
+			code, _, errOut := runWith(t, open, append([]string{"upload-firmware"}, tt.args...)...)
+			if code != 1 || !strings.Contains(errOut, tt.want) {
+				t.Fatalf("exit %d, stderr %q, want %q", code, errOut, tt.want)
+			}
+		})
+	}
 }
