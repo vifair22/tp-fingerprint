@@ -140,13 +140,39 @@ func (l *Link) Raw(req []byte) ([]byte, error) {
 	return rsp, nil
 }
 
+// Commander runs commands and splits replies into status and payload.
+// Link does it in plaintext and Session inside the TLS session; the
+// command helpers take either, as the reference's tls.cmd switches
+// between the two.
+type Commander interface {
+	Cmd(req []byte) (Status, []byte, error)
+	CmdOK(req []byte) ([]byte, error)
+}
+
+// exchanger is one raw request/reply round trip.
+type exchanger interface {
+	Raw(req []byte) ([]byte, error)
+}
+
 // Cmd sends req, retrying while the sensor reports StatusBusy, and splits
 // the reply into its status and payload. A non-zero status is returned as
 // the Status with the payload and a nil error: whether it is a failure is
 // the caller's call (StatusNoFirmware, for one, is normal).
 func (l *Link) Cmd(req []byte) (Status, []byte, error) {
+	return l.retryBusy(l, req)
+}
+
+// CmdOK is Cmd for commands whose only acceptable status is StatusOK.
+func (l *Link) CmdOK(req []byte) ([]byte, error) {
+	return cmdOK(l, req)
+}
+
+func (l *Link) retryBusy(x exchanger, req []byte) (Status, []byte, error) {
+	if len(req) == 0 {
+		return 0, nil, errors.New("empty command")
+	}
 	for attempt := 1; ; attempt++ {
-		rsp, err := l.Raw(req)
+		rsp, err := x.Raw(req)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -162,9 +188,8 @@ func (l *Link) Cmd(req []byte) (Status, []byte, error) {
 	}
 }
 
-// CmdOK is Cmd for commands whose only acceptable status is StatusOK.
-func (l *Link) CmdOK(req []byte) ([]byte, error) {
-	st, payload, err := l.Cmd(req)
+func cmdOK(c Commander, req []byte) ([]byte, error) {
+	st, payload, err := c.Cmd(req)
 	if err != nil {
 		return nil, err
 	}

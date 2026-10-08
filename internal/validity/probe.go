@@ -16,7 +16,7 @@ type RomInfo struct {
 }
 
 // GetRomInfo runs command 0x01.
-func GetRomInfo(l *Link) (RomInfo, error) {
+func GetRomInfo(l Commander) (RomInfo, error) {
 	p, err := l.CmdOK([]byte{0x01})
 	if err != nil {
 		return RomInfo{}, err
@@ -65,7 +65,7 @@ type FlashInfo struct {
 }
 
 // GetFlashInfo runs command 0x3e.
-func GetFlashInfo(l *Link) (FlashInfo, error) {
+func GetFlashInfo(l Commander) (FlashInfo, error) {
 	p, err := l.CmdOK([]byte{0x3e})
 	if err != nil {
 		return FlashInfo{}, err
@@ -136,7 +136,7 @@ const PartitionFwext = 0x02
 // GetFirmwareInfo runs command 0x43 for partition. When the partition
 // holds no firmware, or does not exist, it returns nil with the status
 // that said so and no error.
-func GetFirmwareInfo(l *Link, partition uint8) (*FirmwareInfo, Status, error) {
+func GetFirmwareInfo(l Commander, partition uint8) (*FirmwareInfo, Status, error) {
 	st, p, err := l.Cmd([]byte{0x43, partition})
 	if err != nil {
 		return nil, 0, err
@@ -218,4 +218,26 @@ func Probe(l *Link) (Report, error) {
 		return r, err
 	}
 	return r, nil
+}
+
+// ReadFlash runs command 0x40: read size bytes at addr in partition. The
+// reference reads at most 0x1000 bytes at a time.
+func ReadFlash(l Commander, partition uint8, addr, size uint32) ([]byte, error) {
+	req := make([]byte, 13)
+	req[0], req[1], req[2] = 0x40, partition, 1
+	binary.LittleEndian.PutUint32(req[5:], addr)
+	binary.LittleEndian.PutUint32(req[9:], size)
+	p, err := l.CmdOK(req)
+	if err != nil {
+		return nil, err
+	}
+	// Reply after the status: u32 length, two unknown bytes, the data.
+	if len(p) < 6 {
+		return nil, fmt.Errorf("read flash: %d-byte header: %w", len(p), ErrShortReply)
+	}
+	n := int(binary.LittleEndian.Uint32(p))
+	if len(p)-6 < n {
+		return nil, fmt.Errorf("read flash: %d of %d bytes: %w", len(p)-6, n, ErrShortReply)
+	}
+	return p[6 : 6+n], nil
 }

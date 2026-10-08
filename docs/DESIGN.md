@@ -1,6 +1,7 @@
 # t480-fingerprint design
 
-Status: **transport and probe written** (2026-10-07). This file records the
+Status: **transport, probe and TLS session written** (2026-10-07; the
+session is tested against a fake sensor only, since this one is unpaired). This file records the
 decisions made before the first line was written, so the implementation
 starts from them rather than rediscovering them, and what the real sensor
 has shown since.
@@ -82,6 +83,24 @@ first writes (`3e`, `01`, `19`, `43 02`) and reported:
 - Command `0x19`'s reply is not constant between runs (bytes around offset
   0x1a change), so it probably holds a counter or a nonce. Its meaning is
   still unknown.
+
+## Pairing identity (decided 2026-10-07)
+
+Pairing has the host generate its own P-256 key, encrypt it under keys
+derived from a host identity (`DeriveHostKeys`), and store the blob in the
+sensor's TLS partition. The sensor never sees the identity or the derived
+keys, so the binding is entirely host-side and the identity is our choice.
+
+The reference uses the DMI product name and serial. Here it is **a random
+32-byte secret in a root-only file** (under `/var/lib/fpd`), because:
+
+- the DMI serial now comes from our own coreboot build, and a build that
+  reports it differently would orphan the pairing;
+- the serial is printed on the laptop's underside, so it is not a secret.
+
+The cost: the file must be backed up. Losing it means a factory reset and
+re-enrolling, not data loss. `DMIIdentity` stays in the code, for reading
+a sensor paired by the reference.
 
 ## v1 scope
 
