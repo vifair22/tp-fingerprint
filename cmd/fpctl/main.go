@@ -17,11 +17,14 @@ import (
 	"os/user"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"git.airies.net/vifair22/t480-fingerprint/internal/atomicfile"
+	"git.airies.net/vifair22/t480-fingerprint/internal/client"
 	"git.airies.net/vifair22/t480-fingerprint/internal/fwfetch"
 	"git.airies.net/vifair22/t480-fingerprint/internal/hostid"
+	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
 	"git.airies.net/vifair22/t480-fingerprint/internal/usbfs"
 	"git.airies.net/vifair22/t480-fingerprint/internal/validity"
 	"git.airies.net/vifair22/t480-fingerprint/internal/version"
@@ -47,6 +50,8 @@ type env struct {
 	installerSHA512 string
 	firmwareSHA256  string
 	http            *http.Client
+	// socket is fpd's; everyday commands go through it when fpd runs.
+	socket string
 }
 
 type command struct {
@@ -97,6 +102,7 @@ func main() {
 		installerSHA512: fwfetch.InstallerSHA512,
 		firmwareSHA256:  fwfetch.FirmwareSHA256,
 		http:            &http.Client{Timeout: 5 * time.Minute},
+		socket:          proto.DefaultSocket,
 	}
 	os.Exit(run(e, os.Args[1:]))
 }
@@ -520,6 +526,24 @@ func lookupUser(name string) (uint32, string, error) {
 	return uint32(uid), u.Username, nil
 }
 
+// describeUID names a uid.
+func describeUID(uid uint32) string {
+	if u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil {
+		return fmt.Sprintf("%s (uid %d)", u.Username, uid)
+	}
+	return fmt.Sprintf("uid %d", uid)
+}
+
+// viaFPD runs a request through fpd. handled is false when fpd is not
+// running, and the caller then uses the sensor directly.
+func viaFPD(e *env, typ uint16, payload []byte, ev client.Events) (handled bool, err error) {
+	err = client.Do(e.socket, typ, payload, ev)
+	if errors.Is(err, client.ErrNoDaemon) {
+		return false, nil
+	}
+	return true, err
+}
+
 // describeSID names the user a SID stands for where it can.
 func describeSID(sid validity.SID) string {
 	uid, ok := sid.UID()
@@ -601,6 +625,18 @@ func runEnroll(e *env, args []string) error {
 	}
 	ctx, stop := interruptible()
 	defer stop()
+	fmt.Fprintf(e.stdout, "enrolling %s for %s: touch the sensor\n", *finger, username)
+	handled, err := viaFPD(e, proto.ReqEnroll, proto.U16(proto.U32s(uid), subtype), client.Events{
+		Progress: func(n uint32) { fmt.Fprintf(e.stdout, "  touch %d accepted; lift and touch again\n", n) },
+		Retry:    func(uint32) { fmt.Fprintln(e.stdout, "  touch not accepted; try again") },
+	})
+	if handled {
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(e.stdout, "enrolled %s for %s\n", *finger, username)
+		return nil
+	}
 	return openSensor(e, sa, *calibPath, func(sen *validity.Sensor, sess *validity.Session) error {
 		db := validity.NewDB(sess)
 		if stg, err := db.Storage(); err == nil {
@@ -616,7 +652,6 @@ func runEnroll(e *env, args []string) error {
 		} else if !errors.Is(err, validity.ErrNoStorage) {
 			return err
 		}
-		fmt.Fprintf(e.stdout, "enrolling %s for %s: touch the sensor\n", *finger, username)
 		_, err := sen.Enroll(ctx, validity.UIDSID(uid), subtype, func(ev validity.EnrollEvent) {
 			if ev.Err != nil {
 				fmt.Fprintf(e.stdout, "  touch not accepted (%v); try again\n", ev.Err)
@@ -652,8 +687,27 @@ func runIdentify(e *env, args []string) error {
 	}
 	ctx, stop := interruptible()
 	defer stop()
+	fmt.Fprintln(e.stdout, "touch the sensor")
+	var match *[2]uint32
+	handled, err := viaFPD(e, proto.ReqIdentify, proto.U32s(0), client.Events{
+		Retry:  func(uint32) { fmt.Fprintln(e.stdout, "  scan not usable; try again") },
+		Finger: func(uid uint32, sub uint16) { match = &[2]uint32{uid, uint32(sub)} },
+	})
+	if handled {
+		var re *client.ResultError
+		if errors.As(err, &re) && re.Code == proto.ResultNoMatch {
+			return errors.New("no match: that finger is not enrolled")
+		}
+		if err != nil {
+			return err
+		}
+		if match == nil {
+			return errors.New("fpd reported a match without saying whose")
+		}
+		fmt.Fprintf(e.stdout, "match: %s, %s\n", describeUID(match[0]), validity.FingerName(uint16(match[1])))
+		return nil
+	}
 	return openSensor(e, sa, *calibPath, func(sen *validity.Sensor, sess *validity.Session) error {
-		fmt.Fprintln(e.stdout, "touch the sensor")
 		m, err := sen.Identify(ctx, func(err error) {
 			fmt.Fprintf(e.stdout, "  scan not usable (%v); try again\n", err)
 		})
@@ -689,6 +743,33 @@ func runList(e *env, args []string) error {
 	sa.register(fs)
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	who := uint32(proto.AllUsers)
+	if os.Geteuid() != 0 {
+		who = uint32(os.Getuid())
+	}
+	byUser := map[uint32][]uint16{}
+	var order []uint32
+	handled, err := viaFPD(e, proto.ReqList, proto.U32s(who), client.Events{Finger: func(uid uint32, sub uint16) {
+		if _, seen := byUser[uid]; !seen {
+			order = append(order, uid)
+		}
+		byUser[uid] = append(byUser[uid], sub)
+	}})
+	if handled {
+		if err != nil {
+			return err
+		}
+		if len(order) == 0 {
+			fmt.Fprintln(e.stdout, "no users enrolled")
+		}
+		for _, uid := range order {
+			fmt.Fprintf(e.stdout, "user  %s\n", describeUID(uid))
+			for _, sub := range byUser[uid] {
+				fmt.Fprintf(e.stdout, "  %s\n", validity.FingerName(sub))
+			}
+		}
+		return nil
 	}
 	return openSession(e, sa, func(sess *validity.Session, _ string) error {
 		db := validity.NewDB(sess)
@@ -757,6 +838,17 @@ func runDelete(e *env, args []string) error {
 	uid, username, err := lookupUser(*name)
 	if err != nil {
 		return err
+	}
+	if handled, err := viaFPD(e, proto.ReqDelete, proto.U16(proto.U32s(uid), subtype), client.Events{}); handled {
+		if err != nil {
+			return fmt.Errorf("delete for %s: %w", username, err)
+		}
+		what := *finger
+		if what == "" {
+			what = "enrolled fingers"
+		}
+		fmt.Fprintf(e.stdout, "deleted %s's %s\n", username, what)
+		return nil
 	}
 	return openSession(e, sa, func(sess *validity.Session, _ string) error {
 		db := validity.NewDB(sess)
@@ -843,6 +935,9 @@ func openSystemSensor() (sensor, string, error) {
 		return nil, "", err
 	}
 	dev, err := usbfs.Open(usbfs.System, info, 0)
+	if errors.Is(err, syscall.EBUSY) {
+		return nil, "", fmt.Errorf("the sensor is in use, probably by fpd; stop it first (systemctl stop fpd): %w", err)
+	}
 	if err != nil {
 		return nil, "", err
 	}

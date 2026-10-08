@@ -1,0 +1,60 @@
+# clang-tidy configuration for pam_fpd.
+#
+# Taken from ascii-check's, which settled which checks find real defects in
+# C (the analyser, bugprone, CERT, performance, portability, readability)
+# and why each exclusion is off. The exclusions that apply here are kept
+# with their reasons; the ones specific to ascii-check's code were dropped.
+
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  readability-*,
+
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-braces-around-statements,
+  -readability-isolate-declaration,
+  -bugprone-easily-swappable-parameters,
+  -cert-err33-c,
+  -misc-include-cleaner,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -readability-implicit-bool-conversion,
+  -readability-trailing-comma,
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: 'pam/include/.*\.h$'
+FormatStyle: none
+
+CheckOptions:
+  - key: readability-uppercase-literal-suffix.NewSuffixes
+    value: 'L;U;LL;ULL'
+  - key: bugprone-signed-bitwise.IgnorePositiveIntegerLiterals
+    value: 'true'
+
+# Why each exclusion (see ascii-check's .clang-tidy for the full history):
+#
+# readability-magic-numbers
+#   The wire format is byte offsets and shifts (p[0] | p[1] << 8); naming
+#   each would obscure the layout the code exists to express.
+# readability-identifier-length
+#   Short names in tight scopes (fd, n, p) read better than long ones.
+# readability-braces-around-statements, readability-isolate-declaration
+#   Style, not correctness.
+# bugprone-easily-swappable-parameters
+#   Fires on every (buffer, length) pair.
+# cert-err33-c
+#   Demands checking every printf-family return; the (void) casts already
+#   mark the ones deliberately ignored.
+# misc-include-cleaner
+#   Wants each symbol's defining header included directly, which fights the
+#   libpam headers' layering (pam_ext.h re-exports pam_types.h).
+# clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+#   Demands Annex K functions glibc does not provide.
+# readability-implicit-bool-conversion
+#   Testing an int for truth is ordinary C.
+# readability-trailing-comma
+#   Layout only.

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/user"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
 	"git.airies.net/vifair22/t480-fingerprint/internal/validity"
 )
 
@@ -53,9 +55,12 @@ func runWith(t *testing.T, open func() (sensor, string, error), args ...string) 
 	if open == nil {
 		open = func() (sensor, string, error) { return nil, "", errors.New("no sensor in this test") }
 	}
-	code := run(&env{stdout: &out, stderr: &errOut, open: open}, args)
+	code := run(&env{stdout: &out, stderr: &errOut, open: open, socket: noDaemon}, args)
 	return code, out.String(), errOut.String()
 }
+
+// noDaemon is a socket path nothing listens on: fpd is "not running".
+const noDaemon = "/nonexistent/fpd.sock"
 
 func opener(s *replaySensor) func() (sensor, string, error) {
 	return func() (sensor, string, error) { return s, "fake", nil }
@@ -353,7 +358,7 @@ func runFetch(t *testing.T, pin string, args ...string) (int, string, string) {
 func runFetchPinned(t *testing.T, pin, fwPin string, args ...string) (int, string, string) {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	e := &env{stdout: &out, stderr: &errOut, installerSHA512: pin, firmwareSHA256: fwPin}
+	e := &env{stdout: &out, stderr: &errOut, installerSHA512: pin, firmwareSHA256: fwPin, socket: noDaemon}
 	code := run(e, append([]string{"fetch-firmware"}, args...))
 	return code, out.String(), errOut.String()
 }
@@ -407,7 +412,7 @@ func TestFetchFirmware(t *testing.T) {
 		failing := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return nil, errors.New("offline")
 		})}
-		e := &env{stdout: &out, stderr: &errOut, installerSHA512: pin, http: failing}
+		e := &env{stdout: &out, stderr: &errOut, installerSHA512: pin, http: failing, socket: noDaemon}
 		if code := run(e, []string{"fetch-firmware"}); code != 1 || !strings.Contains(errOut.String(), "offline") {
 			t.Fatalf("exit %d, stderr %q", code, errOut.String())
 		}
@@ -552,5 +557,85 @@ func TestUserResolution(t *testing.T) {
 	other := validity.SID{Revision: 1, Auth: 5, SubAuth: []uint32{18}}
 	if got := describeSID(other); got != "S-1-5-18" {
 		t.Errorf("foreign sid %q", got)
+	}
+}
+
+// fakeFPD answers one request on a fresh socket with the given frames.
+func fakeFPD(t *testing.T, frames ...proto.Frame) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fpd.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		defer ln.Close()
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		proto.Read(c)
+		for _, f := range frames {
+			proto.Write(c, f.Type, f.Payload)
+		}
+	}()
+	return path
+}
+
+func result(r uint32) proto.Frame { return proto.Frame{Type: proto.EvResult, Payload: proto.U32s(r)} }
+
+func finger(uid uint32, sub uint16) proto.Frame {
+	return proto.Frame{Type: proto.EvFinger, Payload: proto.U16(proto.U32s(uid), sub)}
+}
+
+func runViaFPD(t *testing.T, sock string, args ...string) (int, string, string) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	open := func() (sensor, string, error) {
+		return nil, "", errors.New("the sensor must not be opened while fpd runs")
+	}
+	code := run(&env{stdout: &out, stderr: &errOut, open: open, socket: sock}, args)
+	return code, out.String(), errOut.String()
+}
+
+func TestCommandsViaFPD(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Skip(err)
+	}
+	uid, _ := strconv.ParseUint(me.Uid, 10, 32)
+	tests := []struct {
+		name   string
+		frames []proto.Frame
+		args   []string
+		code   int
+		want   string
+	}{
+		{"list", []proto.Frame{finger(uint32(uid), 2), finger(uint32(uid), 7), finger(4000000000, 1), result(0)},
+			[]string{"list"}, 0, "left-index-finger"},
+		{"list empty", []proto.Frame{result(0)}, []string{"list"}, 0, "no users enrolled"},
+		{"list busy", []proto.Frame{result(proto.ResultBusy)}, []string{"list"}, 1, "sensor busy"},
+		{"enroll", []proto.Frame{{Type: proto.EvPrompt}, {Type: proto.EvProgress, Payload: proto.U32s(1)},
+			{Type: proto.EvRetry, Payload: proto.U32s(1)}, result(0)},
+			[]string{"enroll", "--user", me.Username, "--finger", "left-thumb"}, 0, "enrolled left-thumb"},
+		{"enroll exists", []proto.Frame{result(proto.ResultExists)},
+			[]string{"enroll", "--user", me.Username, "--finger", "left-thumb"}, 1, "already enrolled"},
+		{"delete all", []proto.Frame{result(0)}, []string{"delete", "--user", me.Username}, 0, "enrolled fingers"},
+		{"delete one", []proto.Frame{result(0)}, []string{"delete", "--user", me.Username, "--finger", "left-thumb"}, 0, "left-thumb"},
+		{"delete denied", []proto.Frame{result(proto.ResultDenied)}, []string{"delete", "--user", me.Username}, 1, "permission denied"},
+		{"identify", []proto.Frame{{Type: proto.EvPrompt}, {Type: proto.EvRetry, Payload: proto.U32s(1)}, finger(uint32(uid), 2), result(0)},
+			[]string{"identify"}, 0, "right-index-finger"},
+		{"identify no match", []proto.Frame{result(proto.ResultNoMatch)}, []string{"identify"}, 1, "no match"},
+		{"identify denied", []proto.Frame{result(proto.ResultDenied)}, []string{"identify"}, 1, "permission denied"},
+		{"identify without a finger", []proto.Frame{result(0)}, []string{"identify"}, 1, "without saying whose"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, out, errOut := runViaFPD(t, fakeFPD(t, tt.frames...), tt.args...)
+			if code != tt.code || !strings.Contains(out+errOut, tt.want) {
+				t.Fatalf("exit %d, stdout %q, stderr %q, want %q", code, out, errOut, tt.want)
+			}
+		})
 	}
 }

@@ -1,10 +1,10 @@
 # t480-fingerprint design
 
-Status: **enroll and identify work on the real sensor** (2026-10-07),
-through `fpctl`. Transport, probe, TLS session, pairing, firmware fetch and
-upload, calibration, the database, capture, enroll and identify are
-written and have run against the real sensor; factory reset is tested
-against fakes only. Next: `fpd` and `pam_fpd.so`. This file records the
+Status: **fpd and pam_fpd.so work end to end** (2026-10-07), tried through
+a throwaway PAM service; nothing is installed or wired into /etc/pam.d
+yet. Everything else is written and has run against the real sensor;
+factory reset is tested against fakes only. Next: the systemd unit,
+installation and the PAM wiring for sudo and the lock screen. This file records the
 decisions made before the first line was written, so the implementation
 starts from them rather than rediscovering them, and what the real sensor
 has shown since.
@@ -190,6 +190,51 @@ rejected, and left three records in the database (storage, user, finger)
 using 24,320 bytes. `fpctl identify` then matched that finger to the user,
 and for other fingers the sensor answered `5e` with interrupt
 `04000100db` rather than type `03`, which is reported as no match.
+
+## fpd and pam_fpd.so (2026-10-07)
+
+Decisions, made before writing them:
+
+- fpd keeps one session to the sensor open for its lifetime (the reference
+  notes the sensor runs out of memory if new TLS sessions keep coming), and
+  checks before every request that the sensor is still at the bus address
+  it opened; after a resume it is not (#281), and fpd reopens. Any failure
+  below the protocol drops the session for the next request to reopen. On
+  shutdown it reboots the sensor, as the reference does on exit.
+- Socket `/run/fpd/fpd.sock`, mode 0666; callers are identified by
+  `SO_PEERCRED`. Root may act for anyone, others only for themselves;
+  identify (which says whose a finger is) is root only.
+- Frames are u16 type, u16 length, payload (`internal/proto`,
+  `pam/include/fpd_proto.h`, kept equal by a Go test). The PAM module uses
+  only VERIFY and the fixed-size PROMPT, RETRY and RESULT events.
+- One request at a time. A second gets BUSY at once and the PAM module
+  returns `PAM_AUTHINFO_UNAVAIL`, falling back to the password, which is
+  what fprintd's single claim and pam_fprintd do.
+- Touch operations from a remote login session are refused (RESULT
+  REMOTE). The check reads `/proc/<pid>/cgroup` for a `session-N.scope`
+  and that session's `REMOTE=` in `/run/systemd/sessions/N`; a process
+  outside any session scope (a terminal under the user's systemd
+  instance) is local. Anything unreadable counts as local: misjudging a
+  remote caller costs it only the timeout.
+- Defaults: 15 s timeout (pam_fprintd uses 30), 3 tries.
+- Only MATCH grants (`PAM_SUCCESS`) and only NO_MATCH denies
+  (`PAM_AUTH_ERR`); everything else is `PAM_AUTHINFO_UNAVAIL`.
+- fpctl's list, enroll, delete and identify go through fpd when it runs;
+  pair, firmware, calibrate and factory reset need the sensor directly and
+  tell the user to stop fpd when it holds the interface.
+
+clang-tidy's analyser found a real defect in the first version of the C
+client: unknown frame types were given a sentinel "expected length" of
+0xffff, so an unknown frame claiming exactly that length would have been
+read into a 4-byte buffer inside sudo. Unknown types are now rejected
+before their length is looked at, with a test for that frame.
+
+First run against the real sensor, fpd started by hand: it opened and
+warmed the sensor in about a second; `fpctl list` worked as a normal user
+through fpd; `fpctl status` explained that fpd held the sensor. Through
+`pamcheck` (a driver using `pam_start_confdir` with a scratch service
+file), the enrolled finger authenticated, a different finger was rejected
+and retried, and no finger timed out to `PAM_AUTHINFO_UNAVAIL`.
 
 ## Pairing identity (decided 2026-10-07)
 
