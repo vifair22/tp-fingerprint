@@ -440,3 +440,32 @@ func TestPeerString(t *testing.T) {
 		t.Fatal()
 	}
 }
+
+// deadlineReader records whether Verify ran with a deadline.
+type deadlineReader struct {
+	fakeReader
+	hadDeadline bool
+}
+
+func (d *deadlineReader) Verify(ctx context.Context, uid uint32, prompt, retry func()) (bool, error) {
+	_, d.hadDeadline = ctx.Deadline()
+	return true, nil
+}
+
+func TestTimeouts(t *testing.T) {
+	r := &deadlineReader{}
+	s := New(r, slog.New(slog.DiscardHandler), nil)
+	h := &harness{s: s}
+	for _, tt := range []struct {
+		ms   uint32
+		want bool
+	}{{0, true}, {5000, true}, {proto.TimeoutNone, false}} {
+		h.do(t, 1000, proto.ReqVerify, verifyReq(1000, tt.ms, 1))
+		if r.hadDeadline != tt.want {
+			t.Errorf("timeout_ms %#x: deadline %v, want %v", tt.ms, r.hadDeadline, tt.want)
+		}
+	}
+	if got := result(t, h.do(t, 0, proto.ReqIdentify, proto.U32s(proto.TimeoutNone))); got != proto.ResultNoMatch {
+		t.Errorf("identify without a deadline: %s", proto.ResultString(got))
+	}
+}

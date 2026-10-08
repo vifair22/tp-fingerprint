@@ -18,6 +18,8 @@
 /* Requests (client to fpd) */
 #define FPD_REQ_VERIFY 0x0001U
 #define FPD_REQ_VERIFY_LEN 12U /* u32 uid, u32 timeout_ms, u32 max_tries */
+/* timeout_ms meaning "wait until the caller hangs up" (the lock screen) */
+#define FPD_TIMEOUT_NONE 0xFFFFFFFFU
 
 /* Events (fpd to client) */
 #define FPD_EV_PROMPT 0x0081U

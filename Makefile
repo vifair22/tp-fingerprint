@@ -17,7 +17,17 @@ version_ldflags = -X $(PKG)/internal/version.semver=$(SEMVER) \
                   -X $(PKG)/internal/version.stamp=$(STAMP) \
                   -X $(PKG)/internal/version.buildType=$(1)
 
-.PHONY: all release debug race test cover lint fmt clean
+.PHONY: all release debug race test cover lint fmt clean install uninstall
+
+# Local installation, until the ebuild exists. PAM finds the module by its
+# absolute path in /etc/pam.d, so it stays out of the package-managed
+# /usr/lib64/security.
+PREFIX  ?= /usr/local
+DESTDIR ?=
+SBINDIR := $(PREFIX)/sbin
+BINDIR  := $(PREFIX)/bin
+PAMDIR  := $(PREFIX)/lib64/security
+UNITDIR ?= /etc/systemd/system
 
 all: release
 
@@ -53,6 +63,23 @@ lint: pam-analyze pam-tidy
 
 fmt:
 	gofmt -w .
+
+# Copies what `make` built; it does not build, so `sudo make install` never
+# leaves root-owned files in build/.
+install:
+	@test -x $(BIN)/fpd -a -x $(BIN)/fpctl -a -f $(PAM_LIB) || \
+	    { echo "nothing built: run make first (as yourself, not root)" >&2; exit 1; }
+	install -D -m 0755 $(BIN)/fpd $(DESTDIR)$(SBINDIR)/fpd
+	install -D -m 0755 $(BIN)/fpctl $(DESTDIR)$(BINDIR)/fpctl
+	install -D -m 0755 $(PAM_LIB) $(DESTDIR)$(PAMDIR)/pam_fpd.so
+	install -d $(DESTDIR)$(UNITDIR)
+	sed 's|@SBINDIR@|$(SBINDIR)|' packaging/fpd.service > $(DESTDIR)$(UNITDIR)/fpd.service
+	chmod 0644 $(DESTDIR)$(UNITDIR)/fpd.service
+
+# Leaves /var/lib/fpd alone: the host secret and calibration are state.
+uninstall:
+	rm -f $(DESTDIR)$(SBINDIR)/fpd $(DESTDIR)$(BINDIR)/fpctl \
+	    $(DESTDIR)$(PAMDIR)/pam_fpd.so $(DESTDIR)$(UNITDIR)/fpd.service
 
 clean:
 	rm -rf build

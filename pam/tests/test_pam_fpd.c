@@ -160,7 +160,7 @@ static void test_arguments(void **state)
     (void)state;
     uint8_t r[8];
     struct fake_fpd f = {0};
-    const char *args[] = {"timeout=30", "max-tries=5", "debug", "bogus", "timeout=0",
+    const char *args[] = {"timeout=30", "max-tries=5", "debug", "bogus", "timeout=999",
                           "max-tries=x", "socket="};
     assert_int_equal(auth(&f, r, frame_u32(r, FPD_EV_RESULT, FPD_RESULT_MATCH), 0, 7, args),
                      PAM_SUCCESS);
@@ -168,8 +168,22 @@ static void test_arguments(void **state)
     assert_int_equal(f.request[8] | f.request[9] << 8, 30000);
     assert_int_equal(f.request[12], 5);
     assert_non_null(strstr(syslogged, "ignoring argument \"bogus\""));
-    assert_non_null(strstr(syslogged, "ignoring argument \"timeout=0\""));
+    assert_non_null(strstr(syslogged, "ignoring argument \"timeout=999\""));
     assert_non_null(strstr(syslogged, "fingerprint for")); /* debug */
+}
+
+static void test_timeout_zero_means_none(void **state)
+{
+    (void)state;
+    uint8_t r[8];
+    struct fake_fpd f = {0};
+    const char *args[] = {"timeout=0"};
+    assert_int_equal(auth(&f, r, frame_u32(r, FPD_EV_RESULT, FPD_RESULT_MATCH), 0, 1, args),
+                     PAM_SUCCESS);
+    uint32_t ms = (uint32_t)f.request[8] | (uint32_t)f.request[9] << 8 |
+                  (uint32_t)f.request[10] << 16 | (uint32_t)f.request[11] << 24;
+    assert_int_equal(ms, FPD_TIMEOUT_NONE);
+    assert_null(strstr(syslogged, "ignoring argument"));
 }
 
 static void test_no_fpd(void **state)
@@ -206,6 +220,7 @@ int main(void)
         cmocka_unit_test_setup(test_results, setup),
         cmocka_unit_test_setup(test_silent, setup),
         cmocka_unit_test_setup(test_arguments, setup),
+        cmocka_unit_test_setup(test_timeout_zero_means_none, setup),
         cmocka_unit_test_setup(test_no_fpd, setup),
         cmocka_unit_test_setup(test_user_problems, setup),
         cmocka_unit_test(test_setcred),

@@ -5,9 +5,8 @@ Fingerprint authentication for the ThinkPad T480's Synaptics `06cb:009a`
 module, and a CLI. It replaces the python-validity / open-fprintd /
 fprintd-clients stack with one program of our own.
 
-Status: working end to end against the real sensor (pairing, firmware,
-calibration, enroll, identify, fpd, pam_fpd.so); not yet installed as a
-service or wired into /etc/pam.d. See [docs/DESIGN.md](docs/DESIGN.md) for
+Status: working end to end against the real sensor, installed locally on
+the T480 and unlocking the Plasma lock screen; the ebuild is next. See [docs/DESIGN.md](docs/DESIGN.md) for
 the decisions, the scope of v1, and the facts taken from the reference
 implementation.
 
@@ -25,6 +24,19 @@ make lint       # gofmt, go vet, golangci-lint when installed, cppcheck,
 make debug race # debug and race-detector builds of the Go programs
 make pamcheck   # build/bin/pamcheck, to try the module without /etc/pam.d
 ```
+
+## Installing (locally, until the ebuild exists)
+
+```sh
+make                 # as yourself
+sudo make install    # copies only; installs to /usr/local and the unit
+sudo systemctl daemon-reload && sudo systemctl enable --now fpd
+```
+
+Then add `auth sufficient /usr/local/lib64/security/pam_fpd.so` where a
+PAM service should accept a fingerprint (see docs/DESIGN.md, "Local
+installation"). `sudo make uninstall` removes the files and leaves
+/var/lib/fpd, which holds the host secret, alone.
 
 ## Running
 

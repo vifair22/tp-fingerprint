@@ -37,6 +37,7 @@ func TestHeaderMatches(t *testing.T) {
 		"FPD_FRAME_HEADER_LEN":    HeaderLen,
 		"FPD_REQ_VERIFY":          uint64(ReqVerify),
 		"FPD_REQ_VERIFY_LEN":      VerifyLen,
+		"FPD_TIMEOUT_NONE":        TimeoutNone,
 		"FPD_EV_PROMPT":           uint64(EvPrompt),
 		"FPD_EV_PROMPT_LEN":       PromptLen,
 		"FPD_EV_RETRY":            uint64(EvRetry),

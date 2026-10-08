@@ -23,7 +23,7 @@ typedef enum {
 struct fpd_verify_opts {
     const char *socket_path;
     uint32_t uid;
-    uint32_t timeout_ms; /* how long fpd waits for a finger */
+    uint32_t timeout_ms; /* how long fpd waits for a finger, or FPD_TIMEOUT_NONE */
     uint32_t max_tries;  /* non-matching fingers allowed */
 };
 

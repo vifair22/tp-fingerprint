@@ -1,0 +1,51 @@
+# fpd: owns the T480 fingerprint sensor and answers pam_fpd.so and fpctl.
+#
+# The sandbox gives it what it needs and nothing else: the USB device
+# nodes, its socket directory under /run, its state under /var/lib/fpd,
+# read access to /proc and /run/systemd/sessions (for the remote-session
+# check), and no capabilities, since everything it opens is owned by root.
+
+[Unit]
+Description=Fingerprint daemon for the T480 sensor
+Documentation=https://git.airies.net/vifair22/t480-fingerprint
+After=systemd-udevd.service
+
+[Service]
+Type=simple
+ExecStart=@SBINDIR@/fpd
+Restart=on-failure
+RestartSec=5
+
+RuntimeDirectory=fpd
+RuntimeDirectoryMode=0755
+StateDirectory=fpd
+StateDirectoryMode=0700
+UMask=0077
+
+DevicePolicy=closed
+DeviceAllow=char-usb_device rw
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

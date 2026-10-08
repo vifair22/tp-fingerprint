@@ -43,6 +43,8 @@ static void *serve(void *arg)
             break;
         f->request_len += (size_t)n;
     }
+    if (f->delay_ms > 0)
+        (void)poll(NULL, 0, f->delay_ms);
     if (f->hang) {
         char b;
         while (read(c, &b, 1) > 0) {

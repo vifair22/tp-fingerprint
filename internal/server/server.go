@@ -210,11 +210,17 @@ func (s *Server) touchAllowed(c *conn) bool {
 	return true
 }
 
-func timeoutFrom(ms uint32) time.Duration {
-	if ms == 0 {
-		return DefaultTimeout
+// withTimeout applies a request's timeout_ms: 0 is the default,
+// proto.TimeoutNone none at all (the request lasts until the caller hangs
+// up), anything else is capped at MaxTimeout.
+func withTimeout(ctx context.Context, ms uint32) (context.Context, context.CancelFunc) {
+	switch ms {
+	case proto.TimeoutNone:
+		return context.WithCancel(ctx)
+	case 0:
+		return context.WithTimeout(ctx, DefaultTimeout)
 	}
-	return min(time.Duration(ms)*time.Millisecond, MaxTimeout)
+	return context.WithTimeout(ctx, min(time.Duration(ms)*time.Millisecond, MaxTimeout))
 }
 
 // resultFor maps a Reader error to a result code.
@@ -258,7 +264,7 @@ func (s *Server) verify(ctx context.Context, c *conn, req proto.Frame) {
 		return
 	}
 	defer s.busy.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, timeoutFrom(v[1]))
+	ctx, cancel := withTimeout(ctx, v[1])
 	defer cancel()
 	prompt := func() { c.send(proto.EvPrompt, nil) }
 	retry := func() { c.send(proto.EvRetry, proto.U32s(proto.RetryScan)) }
@@ -294,7 +300,7 @@ func (s *Server) identify(ctx context.Context, c *conn, req proto.Frame) {
 		return
 	}
 	defer s.busy.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, timeoutFrom(v[0]))
+	ctx, cancel := withTimeout(ctx, v[0])
 	defer cancel()
 	e, ok, err := s.reader.Identify(ctx, func() { c.send(proto.EvPrompt, nil) },
 		func() { c.send(proto.EvRetry, proto.U32s(proto.RetryScan)) })

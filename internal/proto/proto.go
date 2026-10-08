@@ -46,6 +46,11 @@ const (
 	ResultLen = 4
 )
 
+// TimeoutNone as a request's timeout_ms means no deadline: the request
+// waits until a finger arrives or the caller hangs up. The lock screen uses
+// it, since it never restarts a fingerprint attempt that gave up.
+const TimeoutNone = 0xffffffff
+
 // AllUsers asks ReqList for every user (root only).
 const AllUsers = 0xffffffff
 

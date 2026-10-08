@@ -10,7 +10,9 @@
  * "auth sufficient pam_fpd.so" carries on to the password.
  *
  * Arguments:
- *   timeout=SECONDS   how long to wait for a finger (default 15, max 120)
+ *   timeout=SECONDS   how long to wait for a finger (default 15, max 120);
+ *                     0 waits until the caller gives up, for the lock
+ *                     screen, which never restarts a fingerprint attempt
  *   max-tries=N       non-matching fingers allowed (default 3)
  *   socket=PATH       fpd's socket (default /run/fpd/fpd.sock)
  *   debug             log each outcome to syslog
@@ -63,7 +65,9 @@ static void parse_args(pam_handle_t *pamh, int argc, const char **argv, struct a
         const char *arg = argv[i];
         uint32_t timeout = strncmp(arg, "timeout=", 8) == 0 ? parse_count(arg + 8, MAX_TIMEOUT_S) : 0;
         uint32_t tries = strncmp(arg, "max-tries=", 10) == 0 ? parse_count(arg + 10, MAX_TRIES) : 0;
-        if (timeout != 0)
+        if (strcmp(arg, "timeout=0") == 0)
+            a->timeout_s = 0;
+        else if (timeout != 0)
             a->timeout_s = timeout;
         else if (tries != 0)
             a->max_tries = tries;
@@ -151,7 +155,7 @@ EXPORT int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const ch
     struct fpd_verify_opts opts = {
         .socket_path = a.socket,
         .uid = (uint32_t)uid,
-        .timeout_ms = a.timeout_s * 1000U,
+        .timeout_ms = a.timeout_s == 0 ? FPD_TIMEOUT_NONE : a.timeout_s * 1000U,
         .max_tries = a.max_tries,
     };
     struct conv c = {.pamh = pamh, .silent = ((unsigned int)flags & PAM_SILENT) != 0};

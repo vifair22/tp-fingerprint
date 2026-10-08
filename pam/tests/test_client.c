@@ -119,6 +119,23 @@ static void test_hung_fpd_times_out(void **state)
     assert_int_equal(run(&f, NULL, 0, &e, &result), FPD_ERR_TIMEOUT);
 }
 
+static void test_no_timeout_waits_for_fpd(void **state)
+{
+    (void)state;
+    /* With no timeout the client outlasts its own grace period (300 ms in
+     * the test build) and still takes fpd's late answer. */
+    uint8_t r[8];
+    size_t n = frame_u32(r, FPD_EV_RESULT, FPD_RESULT_MATCH);
+    struct fake_fpd f = {0};
+    f.delay_ms = 600;
+    fake_fpd_start(&f, r, n);
+    struct fpd_verify_opts o = {.socket_path = f.path, .uid = 1, .timeout_ms = FPD_TIMEOUT_NONE, .max_tries = 1};
+    uint32_t result = 99;
+    assert_int_equal(fpd_verify(&o, NULL, NULL, &result), FPD_OK);
+    assert_int_equal(result, FPD_RESULT_MATCH);
+    fake_fpd_stop(&f);
+}
+
 static void test_connect_and_argument_errors(void **state)
 {
     (void)state;
@@ -147,6 +164,7 @@ int main(void)
         cmocka_unit_test(test_protocol_errors),
         cmocka_unit_test(test_early_close),
         cmocka_unit_test(test_hung_fpd_times_out),
+        cmocka_unit_test(test_no_timeout_waits_for_fpd),
         cmocka_unit_test(test_connect_and_argument_errors),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);

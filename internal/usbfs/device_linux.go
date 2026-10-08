@@ -47,6 +47,8 @@ var (
 	ioctlReleaseInterface = ioc(iocRead, 16, 4)
 	ioctlReset            = ioc(iocNone, 20, 0)
 	ioctlClearHalt        = ioc(iocRead, 21, 4)
+	ioctlForbidSuspend    = ioc(iocNone, 33, 0)
+	ioctlAllowSuspend     = ioc(iocNone, 34, 0)
 )
 
 // Device is an open usbdevfs handle with one claimed interface. It is not
@@ -127,6 +129,20 @@ func (d *Device) ClearHalt(ep uint8) error {
 // afterwards, so the handle should be closed and the device found again.
 func (d *Device) Reset() error {
 	return d.ioctl(ioctlReset, 0)
+}
+
+// AllowSuspend lets the kernel autosuspend the device while this handle
+// stays open. By default an open usbfs handle keeps the device, and the
+// hub and controller above it, awake for as long as it is held. After
+// this call no transfer may be made until ForbidSuspend.
+func (d *Device) AllowSuspend() error {
+	return d.ioctl(ioctlAllowSuspend, 0)
+}
+
+// ForbidSuspend wakes the device if it autosuspended and keeps it awake,
+// so transfers can be made again.
+func (d *Device) ForbidSuspend() error {
+	return d.ioctl(ioctlForbidSuspend, 0)
 }
 
 func (d *Device) ioctlInt(req uintptr, v uint32) error {

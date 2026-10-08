@@ -175,8 +175,11 @@ static fpd_status exchange(int fd, const struct fpd_verify_opts *opts, fpd_event
         return st;
 
     /* fpd's timeout covers the whole verify, every try included; past it
-     * plus some slack, fpd itself has hung. */
-    uint64_t deadline = now_ms() + (uint64_t)opts->timeout_ms + (uint64_t)FPD_GRACE_MS;
+     * plus some slack, fpd itself has hung. With no timeout the wait ends
+     * only when fpd answers or closes the socket. */
+    uint64_t deadline = opts->timeout_ms == FPD_TIMEOUT_NONE
+                            ? UINT64_MAX
+                            : now_ms() + (uint64_t)opts->timeout_ms + (uint64_t)FPD_GRACE_MS;
     for (;;) {
         uint8_t hdr[FPD_FRAME_HEADER_LEN];
         st = read_exact(fd, hdr, sizeof hdr, deadline);

@@ -26,7 +26,7 @@ import (
 	"git.airies.net/vifair22/t480-fingerprint/internal/version"
 )
 
-const usage = `usage: fpd [--socket PATH] [--secret PATH] [--calib PATH] [--debug]
+const usage = `usage: fpd [--socket PATH] [--secret PATH] [--calib PATH] [--idle DURATION] [--debug]
 
 Owns the fingerprint sensor and serves requests on a unix socket. Runs as
 root; callers are authorised by their socket credentials.
@@ -34,6 +34,9 @@ root; callers are authorised by their socket credentials.
   --socket PATH   where to listen (default ` + proto.DefaultSocket + `)
   --secret PATH   host secret (default ` + hostid.DefaultPath + `)
   --calib PATH    calibration data (default /var/lib/fpd/calib-data.bin)
+  --idle DURATION how long the sensor stays awake after a request before
+                  USB may suspend it (default 30s); a suspended sensor
+                  costs the next request a fresh session, about a second
   --debug         log every sensor command and reply
   --version       print the version
 `
@@ -49,6 +52,7 @@ func run(args []string, stderr io.Writer) int {
 	secret := fs.String("secret", hostid.DefaultPath, "")
 	calib := fs.String("calib", "/var/lib/fpd/calib-data.bin", "")
 	debug := fs.Bool("debug", false, "")
+	idle := fs.Duration("idle", device.DefaultIdleGrace, "")
 	showVersion := fs.Bool("version", false, "")
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
 		if errors.Is(err, flag.ErrHelp) {
@@ -70,7 +74,7 @@ func run(args []string, stderr io.Writer) int {
 
 	dev := device.New(device.Config{
 		SecretPath: *secret, CalibPath: *calib, FwKey: validity.FirmwarePublicKey(),
-		Bus: usbfs.System, Log: log,
+		Bus: usbfs.System, Log: log, IdleGrace: *idle,
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

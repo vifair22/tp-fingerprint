@@ -17,7 +17,8 @@ struct fake_fpd {
     /* script */
     const uint8_t *reply;
     size_t reply_len;
-    int hang; /* accept, then send nothing until the client goes away */
+    int hang;     /* accept, then send nothing until the client goes away */
+    int delay_ms; /* wait this long before replying */
     /* recorded */
     uint8_t request[64];
     size_t request_len;

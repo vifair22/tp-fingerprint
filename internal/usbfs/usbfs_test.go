@@ -146,6 +146,8 @@ func TestIoctlNumbers(t *testing.T) {
 		{"USBDEVFS_RELEASEINTERFACE", ioctlReleaseInterface, 0x80045510},
 		{"USBDEVFS_RESET", ioctlReset, 0x5514},
 		{"USBDEVFS_CLEAR_HALT", ioctlClearHalt, 0x80045515},
+		{"USBDEVFS_FORBID_SUSPEND", ioctlForbidSuspend, 0x5521},
+		{"USBDEVFS_ALLOW_SUSPEND", ioctlAllowSuspend, 0x5522},
 	}
 	for _, tt := range tests {
 		if tt.got != tt.want {
@@ -222,6 +224,12 @@ func TestDeviceOpsOnNonDevice(t *testing.T) {
 	}
 	if err := d.Reset(); !errors.Is(err, syscall.ENOTTY) {
 		t.Errorf("Reset: %v", err)
+	}
+	if err := d.AllowSuspend(); !errors.Is(err, syscall.ENOTTY) {
+		t.Errorf("AllowSuspend: %v", err)
+	}
+	if err := d.ForbidSuspend(); !errors.Is(err, syscall.ENOTTY) {
+		t.Errorf("ForbidSuspend: %v", err)
 	}
 	if err := d.Close(); !errors.Is(err, syscall.ENOTTY) {
 		t.Errorf("Close: %v", err)

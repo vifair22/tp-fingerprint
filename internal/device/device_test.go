@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
 	"git.airies.net/vifair22/t480-fingerprint/internal/server"
@@ -24,6 +26,10 @@ type fakeSensor struct {
 	failDB    error
 	closed    bool
 	shutdown  bool
+	// awake tracks Wake/Idle; wakeErr makes the next Wake fail.
+	awake   bool
+	idles   int
+	wakeErr error
 }
 
 func newFake() *fakeSensor { return &fakeSensor{users: map[uint16]*validity.User{}, nextID: 10} }
@@ -110,6 +116,22 @@ func (f *fakeSensor) Enroll(_ context.Context, sid validity.SID, subtype uint16,
 	return f.nextID - 1, nil
 }
 
+func (f *fakeSensor) Wake() error {
+	if f.wakeErr != nil {
+		err := f.wakeErr
+		f.wakeErr = nil
+		return err
+	}
+	f.awake = true
+	return nil
+}
+
+func (f *fakeSensor) Idle() error {
+	f.awake = false
+	f.idles++
+	return nil
+}
+
 func (f *fakeSensor) Shutdown() error { f.shutdown = true; return nil }
 func (f *fakeSensor) Close() error    { f.closed = true; return nil }
 
@@ -121,11 +143,16 @@ type rig struct {
 	opens   int
 	sensor  *fakeSensor
 	openErr error
+	// The kernel's suspended-time count, as the device reads it; guarded
+	// by r.d.mu once requests run.
+	sleptMs  int64
+	sleptErr error
 }
 
 func newRig() *rig {
 	r := &rig{at: usbfs.Info{Bus: 1, Addr: 5}, sensor: newFake()}
-	r.d = &Device{cfg: Config{Log: slog.New(slog.DiscardHandler)}}
+	r.d = &Device{cfg: Config{Log: slog.New(slog.DiscardHandler)}, pollEvery: time.Millisecond,
+		idleGrace: time.Hour, suspendedMs: func(usbfs.Info) (int64, error) { return r.sleptMs, r.sleptErr }}
 	r.d.locate = func() (usbfs.Info, error) {
 		if r.gone {
 			return usbfs.Info{}, usbfs.ErrNotFound
@@ -137,6 +164,8 @@ func newRig() *rig {
 			return nil, r.openErr
 		}
 		r.opens++
+		// Opening a usbfs device wakes it.
+		r.sensor.awake = true
 		return r.sensor, nil
 	}
 	return r
@@ -205,15 +234,37 @@ func TestReopenAndDrop(t *testing.T) {
 		t.Fatalf("opens %d, old handle closed %v", r.opens, first.closed)
 	}
 
-	// A USB-level failure drops the session; the next request reopens.
+	// A sensor that fails mid-request is reopened and the scan rerun,
+	// within the same request.
+	fails := 1
+	r.sensor.scan = func() (*validity.Match, error) {
+		if fails > 0 {
+			fails--
+			return nil, usbfs.ErrDisconnected
+		}
+		return &validity.Match{User: me.ID}, nil
+	}
+	prompts := 0
+	if ok, err := r.d.Verify(ctx, 1000, func() { prompts++ }, nop); err != nil || !ok || prompts != 2 || r.opens != 3 {
+		t.Fatalf("transient failure: %v, %v, %d prompts, %d opens", ok, err, prompts, r.opens)
+	}
+	// One that keeps failing is given up on after maxReopens reopens.
+	bctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	r.sensor.scan = func() (*validity.Match, error) { return nil, usbfs.ErrDisconnected }
-	if _, err := r.d.Verify(ctx, 1000, nop, nop); !errors.Is(err, usbfs.ErrDisconnected) {
-		t.Fatalf("usb failure: %v", err)
+	before := r.opens
+	if _, err := r.d.Verify(bctx, 1000, nop, nop); !errors.Is(err, usbfs.ErrDisconnected) {
+		t.Fatalf("persistent failure: %v", err)
+	}
+	// The first attempt reuses the open session; each retry reopens.
+	if r.opens-before != maxReopens {
+		t.Fatalf("%d opens for a persistent failure, want %d", r.opens-before, maxReopens)
 	}
 	r.sensor.scan = func() (*validity.Match, error) { return &validity.Match{User: me.ID}, nil }
-	if ok, _ := r.d.Verify(ctx, 1000, nop, nop); !ok || r.opens != 3 {
-		t.Fatalf("after the drop: match %v, opens %d", ok, r.opens)
+	if ok, _ := r.d.Verify(ctx, 1000, nop, nop); !ok {
+		t.Fatal("no match after the failures")
 	}
+	opensSoFar := r.opens
 
 	// Rejected scans and cancellation keep the session.
 	for _, keep := range []error{validity.ErrScan, validity.ErrEnrollAborted} {
@@ -224,19 +275,20 @@ func TestReopenAndDrop(t *testing.T) {
 	cancel()
 	r.sensor.scan = func() (*validity.Match, error) { return nil, c.Err() }
 	r.d.Verify(c, 1000, nop, nop)
-	if r.opens != 3 {
-		t.Fatalf("session dropped for a benign outcome (%d opens)", r.opens)
+	if r.opens != opensSoFar {
+		t.Fatalf("session dropped for a benign outcome (%d opens, was %d)", r.opens, opensSoFar)
 	}
 
-	// A sensor that is not on the bus is unavailable, and so is one that
-	// will not open.
+	// With a deadline (sudo), a sensor that is not on the bus, or will not
+	// open, is unavailable at once.
 	r.gone = true
-	if _, err := r.d.Verify(ctx, 1000, nop, nop); !errors.Is(err, server.ErrUnavailable) {
-		t.Fatalf("missing sensor: %v", err)
+	start := time.Now()
+	if _, err := r.d.Verify(bctx, 1000, nop, nop); !errors.Is(err, server.ErrUnavailable) || time.Since(start) > time.Second {
+		t.Fatalf("missing sensor: %v after %v", err, time.Since(start))
 	}
 	r.gone = false
 	r.openErr = errors.New("handshake failed")
-	if _, err := r.d.Verify(ctx, 1000, nop, nop); !errors.Is(err, server.ErrUnavailable) {
+	if _, err := r.d.Verify(bctx, 1000, nop, nop); !errors.Is(err, server.ErrUnavailable) {
 		t.Fatalf("unopenable sensor: %v", err)
 	}
 	r.openErr = nil
@@ -283,8 +335,52 @@ func TestIdentify(t *testing.T) {
 		t.Error("scan failure swallowed")
 	}
 	r.gone = true
-	if _, _, err := r.d.Identify(ctx, nop, nop); !errors.Is(err, server.ErrUnavailable) {
+	bctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, _, err := r.d.Identify(bctx, nop, nop); !errors.Is(err, server.ErrUnavailable) {
 		t.Errorf("missing sensor: %v", err)
+	}
+}
+
+// The lock screen asks with no deadline and never asks twice, so its
+// request outlives a suspend: it waits for the sensor to come back.
+func TestNoDeadlineWaitsForTheSensor(t *testing.T) {
+	r := newRig()
+	me := r.sensor.add(1000, 2)
+	r.sensor.scan = func() (*validity.Match, error) { return &validity.Match{User: me.ID}, nil }
+
+	// Asked while the sensor is still re-enumerating after a resume.
+	r.gone = true
+	var mu sync.Mutex
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		mu.Lock()
+		r.gone = false
+		mu.Unlock()
+	}()
+	r.d.locate = func() (usbfs.Info, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.gone {
+			return usbfs.Info{}, usbfs.ErrNotFound
+		}
+		return r.at, nil
+	}
+	if ok, err := r.d.Verify(context.Background(), 1000, nop, nop); err != nil || !ok {
+		t.Fatalf("after waiting: %v, %v", ok, err)
+	}
+
+	// The caller hanging up (unlocking with the password) ends the wait.
+	mu.Lock()
+	r.gone = true
+	mu.Unlock()
+	r.d.drop()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	nodeadline, stop := context.WithCancel(context.Background())
+	go func() { <-ctx.Done(); stop() }()
+	if _, err := r.d.Verify(nodeadline, 1000, nop, nop); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled wait: %v", err)
 	}
 }
 
@@ -358,7 +454,9 @@ func TestEnrollListDelete(t *testing.T) {
 
 func TestNewAndOpenFailures(t *testing.T) {
 	d := New(Config{SecretPath: "/nonexistent/secret", Bus: usbfs.Bus{SysRoot: t.TempDir()}, Log: slog.New(slog.DiscardHandler)})
-	if _, err := d.Verify(context.Background(), 1, nop, nop); !errors.Is(err, server.ErrUnavailable) {
+	bctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := d.Verify(bctx, 1, nop, nop); !errors.Is(err, server.ErrUnavailable) {
 		t.Fatalf("no sensor: %v", err)
 	}
 	if _, err := d.openReal(usbfs.Info{}); err == nil {
@@ -377,5 +475,120 @@ func TestNewAndOpenFailures(t *testing.T) {
 	d.cfg.Bus = usbfs.Bus{DevRoot: dir} // no device node there
 	if _, err := d.openReal(usbfs.Info{Bus: 1, Addr: 4}); err == nil {
 		t.Fatal("opened a missing device node")
+	}
+}
+
+// locked runs fn with the device's lock held, for looking at state the
+// idle timer also touches.
+func (r *rig) locked(fn func()) {
+	r.d.mu.Lock()
+	defer r.d.mu.Unlock()
+	fn()
+}
+
+// Between requests the sensor may autosuspend, once idleGrace has passed.
+// It loses its TLS session when it does, so a request after a real sleep
+// reopens; one after an allowed but untaken sleep, or within the grace,
+// keeps the session.
+func TestIdleBetweenRequests(t *testing.T) {
+	ctx := context.Background()
+	r := newRig()
+	r.d.idleGrace = 5 * time.Millisecond
+	me := r.sensor.add(1000, 2)
+	r.sensor.scan = func() (*validity.Match, error) {
+		if !r.sensor.awake {
+			t.Error("scanned on a sensor that was not woken")
+		}
+		return &validity.Match{User: me.ID}, nil
+	}
+	waitAllowed := func(want bool) {
+		t.Helper()
+		for i := 0; i < 200; i++ {
+			var got bool
+			r.locked(func() { got = r.d.allowed })
+			if got == want {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatalf("suspend allowed never became %v", want)
+	}
+
+	if err := r.d.Warm(); err != nil {
+		t.Fatal(err)
+	}
+	waitAllowed(true)
+	r.locked(func() {
+		if r.sensor.idles != 1 || r.sensor.awake {
+			t.Fatalf("after the grace: %d idles, awake %v", r.sensor.idles, r.sensor.awake)
+		}
+	})
+
+	// Allowed to sleep but did not: the session is reused.
+	if ok, err := r.d.Verify(ctx, 1000, nop, nop); err != nil || !ok || r.opens != 1 {
+		t.Fatalf("untaken sleep: %v, %v, %d opens", ok, err, r.opens)
+	}
+	waitAllowed(true)
+	// It slept: the next request reopens before using the sensor.
+	r.locked(func() { r.sleptMs += 2500 })
+	if ok, err := r.d.Verify(ctx, 1000, nop, nop); err != nil || !ok || r.opens != 2 {
+		t.Fatalf("after a sleep: %v, %v, %d opens", ok, err, r.opens)
+	}
+	// Within the grace no suspend is allowed at all.
+	r.d.idleGrace = time.Hour
+	r.d.List(1000)
+	r.d.List(1000)
+	r.locked(func() {
+		if r.d.allowed {
+			t.Fatal("suspend allowed within the grace")
+		}
+	})
+
+	// A sensor that will not wake is reopened.
+	r.d.idleGrace = 5 * time.Millisecond
+	r.d.List(1000)
+	waitAllowed(true)
+	r.locked(func() { r.sensor.wakeErr = errors.New("device not responding") })
+	if ok, err := r.d.Verify(ctx, 1000, nop, nop); err != nil || !ok || r.opens != 3 {
+		t.Fatalf("after a failed wake: %v, %v, %d opens", ok, err, r.opens)
+	}
+
+	// No suspend count, no suspend: the session could not be judged.
+	waitAllowed(true)
+	r.d.List(1000) // takes the sensor back without a reopen
+	r.locked(func() { r.sleptErr = errors.New("no sysfs") })
+	time.Sleep(30 * time.Millisecond)
+	r.locked(func() {
+		if r.d.allowed {
+			t.Fatal("suspend allowed without a way to tell it happened")
+		}
+		r.sleptErr = nil
+	})
+
+	// Closing after a sleep releases the handle without a reboot over a
+	// session that is gone; closing an awake sensor reboots it.
+	r.d.List(1000)
+	waitAllowed(true)
+	r.locked(func() { r.sleptMs += 1000 })
+	if err := r.d.Close(); err != nil || r.sensor.shutdown || !r.sensor.closed {
+		t.Fatalf("close after a sleep: %v, shutdown %v, closed %v", err, r.sensor.shutdown, r.sensor.closed)
+	}
+	r.d.idleGrace = time.Hour
+	r.d.List(1000)
+	if err := r.d.Close(); err != nil || !r.sensor.shutdown {
+		t.Fatalf("close while awake: %v, shutdown %v", err, r.sensor.shutdown)
+	}
+	r.d.idle() // nothing open: nothing to schedule
+}
+
+func TestReadSuspendedMs(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "power"), 0o755)
+	os.WriteFile(filepath.Join(dir, "power", "runtime_suspended_time"), []byte("1234\n"), 0o644)
+	if ms, err := readSuspendedMs(usbfs.Info{SysPath: dir}); err != nil || ms != 1234 {
+		t.Fatalf("%d, %v", ms, err)
+	}
+	if _, err := readSuspendedMs(usbfs.Info{SysPath: t.TempDir()}); err == nil {
+		t.Fatal("read a missing count")
 	}
 }
