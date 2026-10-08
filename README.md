@@ -7,3 +7,9 @@ fprintd-clients stack with one program of our own.
 
 Status: design only. See [docs/DESIGN.md](docs/DESIGN.md) for the decisions,
 the scope of v1, and the facts taken from the reference implementation.
+
+## License
+
+GPL-3.0 (see [LICENSE](LICENSE)). The sensor protocol is ported from
+[python-validity](https://github.com/uunicorn/python-validity), which is
+MIT-licensed; its copyright notice is kept with the ported code.
