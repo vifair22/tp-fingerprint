@@ -74,6 +74,11 @@ func (s *simSensor) dbCmd(req []byte) []byte {
 		id := d.next
 		d.next++
 		d.records[id] = &simRecord{id, parent, typ, stg, append([]byte(nil), req[9:]...)}
+		if typ == recFinger {
+			// The sensor raises an interrupt once a finger is stored;
+			// the reference waits for it.
+			s.tls.ints = append(s.tls.ints, []byte{7, 0, 0})
+		}
 		return concat(ok, u16s(int(id)))
 	case 0x48:
 		id := le.Uint16(req[1:])

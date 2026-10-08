@@ -35,7 +35,11 @@ type simSensor struct {
 	captures [][]byte
 	frames   func() []byte
 	// db is the sensor's record store; see db_test.go.
-	db       *simDB
+	db *simDB
+	// Scanning state, and the interrupts each capture raises; see
+	// capture_test.go.
+	scan     simScan
+	touch    func() [][]byte
 	cmds     []string
 	rebooted int
 }
@@ -119,7 +123,14 @@ func (s *simSensor) sessionCmd(req []byte) []byte {
 		if s.frames != nil {
 			s.tls.data = s.frames()
 		}
+		if s.touch != nil {
+			s.tls.ints = append(s.tls.ints, s.touch()...)
+		}
 		return ok
+	case 0x39, 0x04, 0x62, 0x69:
+		return ok
+	case 0x51, 0x68, 0x6b, 0x5e, 0x60:
+		return s.scanCmd(req)
 	case 0x6f:
 		return concat(ok, s.factoryBits())
 	case 0x40:

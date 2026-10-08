@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"os/user"
 	"strconv"
 	"strings"
@@ -67,6 +68,8 @@ func init() {
 		{"upload-firmware", "write the firmware to a paired sensor", uploadFirmwareUsage, runUploadFirmware},
 		{"calibrate", "calibrate the sensor and store the result", calibrateUsage, runCalibrate},
 		{"list", "list enrolled users and fingers", listUsage, runList},
+		{"enroll", "enroll a finger for a user", enrollUsage, runEnroll},
+		{"identify", "scan a finger and say whose it is", identifyUsage, runIdentify},
 		{"delete", "delete a user's enrolled fingers", deleteUsage, runDelete},
 		{"version", "print the version", "usage: fpctl version\n", runVersion},
 		{"help", "show help for a command", "usage: fpctl help [command]\n", runHelp},
@@ -527,6 +530,148 @@ func describeSID(sid validity.SID) string {
 		return fmt.Sprintf("%s (uid %d)", u.Username, uid)
 	}
 	return fmt.Sprintf("uid %d", uid)
+}
+
+// openSensor opens the session, then the sensor itself, calibrating it if
+// the saved calibration is missing or stale and saving the result.
+func openSensor(e *env, sa sessionArgs, calibPath string, fn func(sen *validity.Sensor, sess *validity.Session) error) error {
+	saved, err := os.ReadFile(calibPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return openSession(e, sa, func(sess *validity.Session, _ string) error {
+		sen, err := validity.OpenSensor(sess, saved)
+		if err != nil {
+			return err
+		}
+		did, err := sen.Calibrate(context.Background(), false)
+		if err != nil {
+			return err
+		}
+		if did {
+			fmt.Fprintln(e.stderr, "calibrated the sensor")
+			if err := atomicfile.Write(calibPath, sen.CalibrationData(), 0o600); err != nil {
+				return err
+			}
+		}
+		return fn(sen, sess)
+	})
+}
+
+// interruptible returns a context cancelled on SIGINT, so an abandoned
+// scan stops the sensor cleanly.
+func interruptible() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt)
+}
+
+const enrollUsage = `usage: fpctl enroll --user NAME --finger FINGER [--calib PATH] [--secret PATH] [--trace]
+
+Enrolls FINGER (an fprintd name such as right-index-finger) for the user.
+Touch the sensor when it lights up and lift between touches; the sensor
+decides how many touches it needs. A rejected touch is reported and simply
+repeated. Ctrl-C abandons the enrollment.
+
+  --user NAME       user name or uid
+  --finger FINGER   which finger
+  --calib PATH      calibration data (default ` + defaultCalibPath + `)
+  --secret PATH     host secret (default ` + hostid.DefaultPath + `)
+  --trace           log every command and reply in hex to stderr
+`
+
+func runEnroll(e *env, args []string) error {
+	fs := flag.NewFlagSet("enroll", flag.ContinueOnError)
+	name := fs.String("user", "", "")
+	finger := fs.String("finger", "", "")
+	calibPath := fs.String("calib", defaultCalibPath, "")
+	var sa sessionArgs
+	sa.register(fs)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if *name == "" || *finger == "" {
+		return &usageError{"--user and --finger are required"}
+	}
+	subtype, ok := validity.FingerSubtype(*finger)
+	if !ok {
+		return &usageError{fmt.Sprintf("unknown finger %q", *finger)}
+	}
+	uid, username, err := lookupUser(*name)
+	if err != nil {
+		return err
+	}
+	ctx, stop := interruptible()
+	defer stop()
+	return openSensor(e, sa, *calibPath, func(sen *validity.Sensor, sess *validity.Session) error {
+		db := validity.NewDB(sess)
+		if stg, err := db.Storage(); err == nil {
+			if u, err := db.LookupUser(stg.ID, validity.UIDSID(uid)); err != nil {
+				return err
+			} else if u != nil {
+				for _, f := range u.Fingers {
+					if f.Subtype == subtype {
+						return fmt.Errorf("%s already has %s enrolled; delete it first", username, *finger)
+					}
+				}
+			}
+		} else if !errors.Is(err, validity.ErrNoStorage) {
+			return err
+		}
+		fmt.Fprintf(e.stdout, "enrolling %s for %s: touch the sensor\n", *finger, username)
+		_, err := sen.Enroll(ctx, validity.UIDSID(uid), subtype, func(ev validity.EnrollEvent) {
+			if ev.Err != nil {
+				fmt.Fprintf(e.stdout, "  touch not accepted (%v); try again\n", ev.Err)
+				return
+			}
+			fmt.Fprintf(e.stdout, "  touch %d accepted; lift and touch again\n", ev.Touch)
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(e.stdout, "enrolled %s for %s\n", *finger, username)
+		return nil
+	})
+}
+
+const identifyUsage = `usage: fpctl identify [--calib PATH] [--secret PATH] [--trace]
+
+Waits for a finger on the sensor and reports which enrolled user and finger
+it matched. Ctrl-C stops waiting.
+
+  --calib PATH    calibration data (default ` + defaultCalibPath + `)
+  --secret PATH   host secret (default ` + hostid.DefaultPath + `)
+  --trace         log every command and reply in hex to stderr
+`
+
+func runIdentify(e *env, args []string) error {
+	fs := flag.NewFlagSet("identify", flag.ContinueOnError)
+	calibPath := fs.String("calib", defaultCalibPath, "")
+	var sa sessionArgs
+	sa.register(fs)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	ctx, stop := interruptible()
+	defer stop()
+	return openSensor(e, sa, *calibPath, func(sen *validity.Sensor, sess *validity.Session) error {
+		fmt.Fprintln(e.stdout, "touch the sensor")
+		m, err := sen.Identify(ctx, func(err error) {
+			fmt.Fprintf(e.stdout, "  scan not usable (%v); try again\n", err)
+		})
+		if errors.Is(err, validity.ErrNoMatch) {
+			// One line, and a non-zero exit so scripts can tell.
+			return errors.New("no match: that finger is not enrolled")
+		}
+		if err != nil {
+			return err
+		}
+		db := validity.NewDB(sess)
+		who := fmt.Sprintf("user record %d", m.User)
+		if u, err := db.User(m.User); err == nil {
+			who = describeSID(u.SID)
+		}
+		fmt.Fprintf(e.stdout, "match: %s, %s\n", who, validity.FingerName(m.Subtype))
+		return nil
+	})
 }
 
 const listUsage = `usage: fpctl list [--secret PATH] [--trace]

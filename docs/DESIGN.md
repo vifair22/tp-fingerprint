@@ -1,10 +1,10 @@
 # t480-fingerprint design
 
-Status: **sensor paired, firmware loaded, calibrated** (2026-10-07).
-Transport, probe, TLS session, pairing, firmware fetch and upload,
-calibration, the sensor's database layer and factory reset are written;
-all but factory reset have run against the real sensor. Next: capture,
-enroll and identify. This file records the
+Status: **enroll and identify work on the real sensor** (2026-10-07),
+through `fpctl`. Transport, probe, TLS session, pairing, firmware fetch and
+upload, calibration, the database, capture, enroll and identify are
+written and have run against the real sensor; factory reset is tested
+against fakes only. Next: `fpd` and `pam_fpd.so`. This file records the
 decisions made before the first line was written, so the implementation
 starts from them rather than rediscovering them, and what the real sensor
 has shown since.
@@ -172,6 +172,24 @@ start, the storage is created on first enrollment, so `fpctl list` writes
 nothing. On the real sensor (still empty) `45` reported 524,288 bytes,
 partition 4's size, with 512 used and no records, and the storage lookup
 answered `0x04b3` (not found).
+
+## Capture, enroll and identify (2026-10-07)
+
+Ported from `sensor.py`: the capture sequence (command `02` built for the
+mode, interrupts for start, finger down and capture updates until bit 4,
+the result from `51 00 20 00 00`, always `04` after), enrollment (`69`,
+then per touch `68`, `6b`, `6b` until the sensor returns a template id,
+then the user and finger records) and identification (`5e` against any
+user, `60` for the result, `62` after). Two departures: a run of ten
+rejected touches abandons an enrollment, where the reference retries
+forever, and only rejected scans and sensor statuses are retried, where the
+reference retries any exception but a USB error.
+
+The first real enrollment (right index finger) took 11 touches, none
+rejected, and left three records in the database (storage, user, finger)
+using 24,320 bytes. `fpctl identify` then matched that finger to the user,
+and for other fingers the sensor answered `5e` with interrupt
+`04000100db` rather than type `03`, which is reported as no match.
 
 ## Pairing identity (decided 2026-10-07)
 
