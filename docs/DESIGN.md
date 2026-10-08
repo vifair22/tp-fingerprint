@@ -1,8 +1,9 @@
 # t480-fingerprint design
 
-Status: **design, no code yet** (2026-10-07). This file records the decisions
-made before the first line was written, so the implementation starts from
-them rather than rediscovering them.
+Status: **transport and probe written** (2026-10-07). This file records the
+decisions made before the first line was written, so the implementation
+starts from them rather than rediscovering them, and what the real sensor
+has shown since.
 
 ## Why this exists
 
@@ -58,6 +59,29 @@ parses device data or does cryptography is in Go.
   (`6_07f_lenovo_mis_qm.xpfwext`). The reference downloads the package,
   checks a pinned SHA-512 and extracts the one file with `innoextract`. It is
   proprietary: fetched on the machine, never packaged or published.
+
+## This T480's sensor (first probe, 2026-10-07)
+
+The laptop was bought used, so the sensor's history was unknown. `fpctl
+probe` sends only the read-only commands the reference sends before it
+first writes (`3e`, `01`, `19`, `43 02`) and reported:
+
+- ROM 6.7 build 164, product 0x30; the ROM timestamp 0x545eb0f0 decodes to
+  2014-11-09 as unix seconds.
+- Flash: JEDEC `c8:40`, 4096 x 256 bytes, which is the GigaDevice GD25Q80C
+  (1 MiB) in the reference's IC table. The header is present but the
+  partition table is **empty**, so nothing has paired with this sensor (or
+  it was factory-reset). Pairing starts from a clean slate: the
+  reference's `init_flash` would format it.
+- `43 02` (fwext header) answered status **`0x04af`**, not the `0x04b0`
+  "no firmware" the reference checks for. The reference's `send_init`
+  treats any non-zero status there as a clean slate, so it never tripped on
+  it. Read here as "no such partition", which fits the empty table; that
+  name is an inference from one observation.
+- No `0x0104` busy replies on a cold open. The retry stays in.
+- Command `0x19`'s reply is not constant between runs (bytes around offset
+  0x1a change), so it probably holds a counter or a nonce. Its meaning is
+  still unknown.
 
 ## v1 scope
 
