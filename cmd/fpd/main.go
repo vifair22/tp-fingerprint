@@ -21,6 +21,7 @@ import (
 	"git.airies.net/vifair22/t480-fingerprint/internal/hostid"
 	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
 	"git.airies.net/vifair22/t480-fingerprint/internal/server"
+	"git.airies.net/vifair22/t480-fingerprint/internal/trust"
 	"git.airies.net/vifair22/t480-fingerprint/internal/usbfs"
 	"git.airies.net/vifair22/t480-fingerprint/internal/validity"
 	"git.airies.net/vifair22/t480-fingerprint/internal/version"
@@ -75,6 +76,7 @@ func run(args []string, stderr io.Writer) int {
 	dev := device.New(device.Config{
 		SecretPath: *secret, CalibPath: *calib, FwKey: validity.FirmwarePublicKey(),
 		Bus: usbfs.System, Log: log, IdleGrace: *idle,
+		PinPath: trust.DefaultPinPath, LedgerPath: trust.DefaultLedgerPath,
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

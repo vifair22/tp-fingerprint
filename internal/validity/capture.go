@@ -182,6 +182,27 @@ func (s *Sensor) enrollmentEnd() {
 	}
 }
 
+// ParseFingerData reads a finger record's value as fingerData lays it
+// out, returning the finger and the template id.
+func ParseFingerData(v []byte) (subtype uint16, tid []byte, err error) {
+	bad := fmt.Errorf("finger record: %d bytes: %w", len(v), ErrShortReply)
+	if len(v) < 12 || binary.LittleEndian.Uint16(v[8:]) != 1 {
+		return 0, nil, bad
+	}
+	subtype = binary.LittleEndian.Uint16(v)
+	tl := int(binary.LittleEndian.Uint16(v[10:]))
+	rest := v[12:]
+	if len(rest) < tl+4 || binary.LittleEndian.Uint16(rest[tl:]) != 2 {
+		return 0, nil, bad
+	}
+	il := int(binary.LittleEndian.Uint16(rest[tl+2:]))
+	rest = rest[tl+4:]
+	if len(rest) < il {
+		return 0, nil, bad
+	}
+	return subtype, append([]byte(nil), rest[:il]...), nil
+}
+
 // fingerData is make_finger_data: the finger record's value.
 func fingerData(subtype uint16, template, tid []byte) []byte {
 	t := concat(u16le(1, len(template)), template)
@@ -202,14 +223,18 @@ func u16le(vs ...int) []byte {
 // are captured until the sensor reports a complete template, then the
 // user record (created if needed) gets a finger record. progress, if not
 // nil, is called after every touch. It returns the finger record's id.
-func (s *Sensor) Enroll(ctx context.Context, sid SID, subtype uint16, progress func(EnrollEvent)) (uint16, error) {
+//
+// It returns the finger record's id and the template id (tid) the sensor
+// gave the template, which a match later reports; the host keeps it to
+// recognise its own enrollments (docs/DESIGN.md, finding F2).
+func (s *Sensor) Enroll(ctx context.Context, sid SID, subtype uint16, progress func(EnrollEvent)) (uint16, []byte, error) {
 	db := NewDB(s.sess)
 	stg, err := db.EnsureStorage()
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	if _, err := s.sess.CmdOK([]byte{0x69, 1, 0, 0, 0}); err != nil {
-		return 0, fmt.Errorf("start enrollment: %w", err)
+		return 0, nil, fmt.Errorf("start enrollment: %w", err)
 	}
 	var (
 		key      uint32
@@ -230,10 +255,10 @@ func (s *Sensor) Enroll(ctx context.Context, sid SID, subtype uint16, progress f
 			}
 		case ctx.Err() != nil:
 			_ = s.Glow(false)
-			return 0, ctx.Err()
+			return 0, nil, ctx.Err()
 		case !retryable(err):
 			_ = s.Glow(false)
-			return 0, err
+			return 0, nil, err
 		default:
 			failures++
 			if progress != nil {
@@ -241,7 +266,7 @@ func (s *Sensor) Enroll(ctx context.Context, sid SID, subtype uint16, progress f
 			}
 			if failures >= maxEnrollFailures {
 				_ = s.Glow(false)
-				return 0, fmt.Errorf("%w: %w", ErrEnrollAborted, err)
+				return 0, nil, fmt.Errorf("%w: %w", ErrEnrollAborted, err)
 			}
 		}
 	}
@@ -250,22 +275,22 @@ func (s *Sensor) Enroll(ctx context.Context, sid SID, subtype uint16, progress f
 
 	user, err := db.LookupUser(stg.ID, sid)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	var uid uint16
 	if user != nil {
 		uid = user.ID
 	} else if uid, err = db.NewUser(stg.ID, sid); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	fid, err := db.NewFinger(stg.ID, uid, fingerData(subtype, template, tid))
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	if _, err := s.sess.link.WaitInt(ctx); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	return fid, s.Glow(false)
+	return fid, tid, s.Glow(false)
 }
 
 // enrollTouch is one pass of the enrollment loop: light, capture, start
@@ -357,6 +382,10 @@ func (s *Sensor) Identify(ctx context.Context, retry func(error)) (*Match, error
 // any storage, then fetch the result. Command 0x62 cleans up whatever
 // happened.
 func (s *Sensor) match(ctx context.Context) (*Match, error) {
+	// Clean up before as well as after. Until 0x62 runs, 0x60 keeps
+	// returning the last match (seen on the real sensor), so a cleanup
+	// that never arrived must not leave an old result to be read.
+	_, _, _ = s.sess.Cmd([]byte{0x62, 0, 0, 0, 0})
 	defer func() { _, _, _ = s.sess.Cmd([]byte{0x62, 0, 0, 0, 0}) }()
 	req := []byte{0x5e, 2, 0xff}
 	req = append(req, u16le(0, 0, 1, 0, 0)...) // storage 0, user 0: any

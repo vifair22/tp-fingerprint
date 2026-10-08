@@ -80,6 +80,10 @@ const (
 	// StatusNoFirmware is the reply to a firmware query for a partition
 	// with no firmware loaded. It is normal before the first upload.
 	StatusNoFirmware Status = 0x04b0
+	// StatusSessionActive answers a plaintext command sent while a TLS
+	// session is up. The sensor drops the session along with it (seen on
+	// the real sensor, see docs/DESIGN.md "Threat model").
+	StatusSessionActive Status = 0x0315
 )
 
 func (s Status) String() string {
@@ -94,6 +98,8 @@ func (s Status) String() string {
 		return "no partition"
 	case StatusNoFirmware:
 		return "no firmware"
+	case StatusSessionActive:
+		return "session active"
 	}
 	return fmt.Sprintf("0x%04x", uint16(s))
 }

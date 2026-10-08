@@ -112,9 +112,12 @@ func TestEnrollThenIdentify(t *testing.T) {
 	var events []EnrollEvent
 	sid := UIDSID(1000)
 	s.tls.ints = nil
-	fid, err := sen.Enroll(ctx, sid, 2, func(e EnrollEvent) { events = append(events, e) })
+	fid, tid, err := sen.Enroll(ctx, sid, 2, func(e EnrollEvent) { events = append(events, e) })
 	if err != nil {
 		t.Fatal(err)
+	}
+	if string(tid) != "template-id" {
+		t.Fatalf("tid %q", tid)
 	}
 	var good, bad int
 	for _, e := range events {
@@ -140,7 +143,7 @@ func TestEnrollThenIdentify(t *testing.T) {
 	}
 	// A second finger joins the same user record.
 	s.scan = simScan{need: 2}
-	if _, err := sen.Enroll(ctx, sid, 7, nil); err != nil {
+	if _, _, err := sen.Enroll(ctx, sid, 7, nil); err != nil {
 		t.Fatal(err)
 	}
 	if u, _ := db.LookupUser(stg.ID, sid); len(u.Fingers) != 2 {
@@ -153,7 +156,8 @@ func TestEnrollThenIdentify(t *testing.T) {
 		t.Fatalf("identify %+v, %v", m, err)
 	}
 	log := strings.Join(s.cmds, " ")
-	if !strings.Contains(log, "tls:5e tls:60 tls:62") {
+	// Cleaned up before the match as well as after.
+	if !strings.Contains(log, "tls:62 tls:5e tls:60 tls:62") {
 		t.Fatalf("match sequence missing from %s", log[len(log)-200:])
 	}
 	s.scan.match = 0
@@ -167,7 +171,7 @@ func TestEnrollGivesUp(t *testing.T) {
 	for range maxEnrollFailures {
 		sim.scan.scanErrors = append(sim.scan.scanErrors, 0x0b)
 	}
-	_, err := sen.Enroll(context.Background(), UIDSID(1), 1, nil)
+	_, _, err := sen.Enroll(context.Background(), UIDSID(1), 1, nil)
 	if !errors.Is(err, ErrEnrollAborted) {
 		t.Fatalf("err = %v", err)
 	}
@@ -177,7 +181,7 @@ func TestEnrollStopsOnFatalErrors(t *testing.T) {
 	t.Run("unexpected first interrupt", func(t *testing.T) {
 		s, sen := scanningSim(t)
 		s.touch = func() [][]byte { return [][]byte{{3, 0, 0}} }
-		if _, err := sen.Enroll(context.Background(), UIDSID(1), 1, nil); err == nil || errors.Is(err, ErrEnrollAborted) {
+		if _, _, err := sen.Enroll(context.Background(), UIDSID(1), 1, nil); err == nil || errors.Is(err, ErrEnrollAborted) {
 			t.Fatalf("err = %v, want an immediate failure", err)
 		}
 	})
@@ -186,7 +190,7 @@ func TestEnrollStopsOnFatalErrors(t *testing.T) {
 		s.touch = func() [][]byte { return [][]byte{{0, 0, 0}} }
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if _, err := sen.Enroll(ctx, UIDSID(1), 1, nil); !errors.Is(err, context.Canceled) {
+		if _, _, err := sen.Enroll(ctx, UIDSID(1), 1, nil); !errors.Is(err, context.Canceled) {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -200,14 +204,14 @@ func TestEnrollStopsOnFatalErrors(t *testing.T) {
 			}
 			return orig(req)
 		}
-		if _, err := sen.Enroll(context.Background(), UIDSID(1), 1, nil); !errors.Is(err, ErrShortReply) {
+		if _, _, err := sen.Enroll(context.Background(), UIDSID(1), 1, nil); !errors.Is(err, ErrShortReply) {
 			t.Fatalf("err = %v", err)
 		}
 	})
 	t.Run("storage cannot be created", func(t *testing.T) {
 		s, sen := scanningSim(t)
 		s.fail = "tls:47"
-		if _, err := sen.Enroll(context.Background(), UIDSID(1), 1, nil); err == nil {
+		if _, _, err := sen.Enroll(context.Background(), UIDSID(1), 1, nil); err == nil {
 			t.Fatal("enrolled")
 		}
 	})
@@ -266,5 +270,23 @@ func TestFingerData(t *testing.T) {
 	want := "0200" + "0300" + "0b00" + "2000" + "0100" + "0100" + "aa" + "0200" + "0200" + "bbcc" + strings.Repeat("00", 0x20)
 	if hexOf(got) != want {
 		t.Fatalf("got %s", hexOf(got))
+	}
+}
+
+func TestParseFingerData(t *testing.T) {
+	v := fingerData(7, bytes.Repeat([]byte{0xaa}, 100), []byte("the-tid"))
+	sub, tid, err := ParseFingerData(v)
+	if err != nil || sub != 7 || string(tid) != "the-tid" {
+		t.Fatalf("%d %q %v", sub, tid, err)
+	}
+	for name, bad := range map[string][]byte{
+		"short":            v[:10],
+		"wrong tag":        append(u16s(7, 3, 0, 0x20, 9, 0), v[12:]...),
+		"template overrun": append(u16s(7, 3, 0, 0x20, 1, 5000), v[12:]...),
+		"tid overrun":      v[:len(v)-0x20-3],
+	} {
+		if _, _, err := ParseFingerData(bad); err == nil {
+			t.Errorf("%s: parsed", name)
+		}
 	}
 }

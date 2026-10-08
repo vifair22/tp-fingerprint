@@ -351,22 +351,33 @@ What the probes in `internal/validity/hwprobe_test.go` (build tag
   persists: the next `5e` is refused with `0x04fc`, and `60` still returns
   the previous match.
 
-Findings and what is planned for each (implemented with phase 2):
+Findings and what was done for each. F1, F2, F4, F5 and the `0x0315`
+retry were implemented on 2026-10-08 and run on the real machine: on the
+first start fpd pinned the sensor and adopted the one enrolled finger
+(record 5, tid `ca3d6368...`, the value the probes saw in its matches),
+and the lock screen then unlocked with the ledger check in force.
 
 - **F1, no sensor pinning (fix).** The host accepts any Synaptics-signed
   sensor key, so a second genuine sensor, paired by the attacker with the
   attacker's finger under the predictable SID and carrying our encrypted
   host-key blob (readable from our sensor in plaintext), might be swapped
   in, provided that sensor can be made to trust our public key (its trust
-  anchor is signed with the public `hs_key`; unverified). Fix: pin a hash
-  of the sensor's ECDH public key at pairing (root-only, beside the host
-  secret) and refuse any other.
-- **F2, the sensor's database is trusted (fix).** Fix: a host-side
-  enrollment ledger, root-only: uid, finger, finger record and tid,
-  written when fpd enrolls. A verify must return a tid recorded for that
-  user. An attacker's template has another tid and ours is never visible
-  outside the session and the ledger. Existing enrollments are adopted
-  once from the sensor's records (trust on first use, as root).
+  anchor is signed with the public `hs_key`; unverified). Done: `fpctl
+  pair` pins a SHA-256 of the sensor's ECDH public key in
+  `/var/lib/fpd/sensor-pin`; fpd and fpctl check it on every open and
+  refuse any other sensor at once (no reopen attempts, which would each
+  cost it a session). A pairing made before pinning is pinned on first
+  use.
+- **F2, the sensor's database is trusted (fix).** Done:
+  `/var/lib/fpd/enrolled`, root-only: uid, finger, finger record and tid,
+  written on enroll and delete (by fpd, and by fpctl when it drives the
+  sensor itself). A verify succeeds only if the match's tid is one
+  recorded for that user; identify names the ledger's owner; list shows
+  only what the ledger backs; a user missing from it is not enrolled. An
+  attacker's template has another tid, and ours is never visible outside
+  the session and the ledger. With no ledger file, the sensor's current
+  enrollments are adopted once (trust on first use, as root); a new
+  pairing starts an empty one.
 - **F3, replay within a session (residual).** Record MACs cover type,
   version, length and body with no sequence number (the sensor's protocol),
   so an implant on the internal USB could replay a recorded reply, and
@@ -377,12 +388,15 @@ Findings and what is planned for each (implemented with phase 2):
   and every suspend). An implant in the case could log the keyboard too.
 - **F4, stale match results (hardening).** Safe today: `60` fails after a
   no-match once `62` has run, and fpd always runs it and checks `5e`'s
-  status. Exploiting the persistence needs F3's replay. Hardening: send
-  `62` before `5e` as well.
+  status. Exploiting the persistence needs F3's replay. Done: `62` is
+  sent before `5e` as well as after.
 - **F5, unlimited attempts (fix).** Each resume gives the lock screen 3
   fresh tries, so lid cycling gives unbounded attempts with fake prints.
-  Fix: after 5 consecutive no-matches for a user, refuse fingerprint for 30
-  minutes (password only); a match resets the count.
+  Done: fpd counts non-matching fingers per user (each touch, not each
+  request); the fifth in a row refuses fingerprint for that user for 30
+  minutes with RESULT LOCKED_OUT, which pam_fpd shows as "use your
+  password". A match resets the count. The state is in memory: only root
+  can restart fpd.
 - **F6, unauthenticated plaintext commands (accepted).** Factory reset and
   flash reads need no session. A physical attacker can wipe the pairing
   (fingerprint is lost, the password remains) and read the encrypted
@@ -392,9 +406,8 @@ Findings and what is planned for each (implemented with phase 2):
 - **F8, the host secret.** Keep an encrypted backup; it is as sensitive as
   the pairing.
 
-Also fixed with this work: a re-open that meets `0x0315` (the sensor still
-holding a session the host dropped) retries at once instead of failing the
-request.
+Also done: a re-open that meets `0x0315` (the sensor still holding a
+session the host dropped) retries at once instead of failing the request.
 
 ## Pairing identity (decided 2026-10-07)
 
@@ -468,9 +481,8 @@ the eleventh and completion fills the progress circle, so it never
 overshoots.
 
 Order of work: the tampering fixes F1, F2, F4, F5 and the `0x0315` re-open
-retry first (they change the enrollment and pairing paths phase 2 builds
-on), then the D-Bus service, then a test from System Settings, then the
-ebuild.
+retry first (done 2026-10-08), then the D-Bus service, then a test from
+System Settings, then the ebuild.
 
 ## Project conventions
 

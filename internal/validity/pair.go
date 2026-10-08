@@ -200,57 +200,60 @@ var ErrAlreadyPartitioned = errors.New("sensor flash is already partitioned")
 // partitioned but without the TLS block, which only a factory reset
 // recovers. The steps between are short and none of them is expected to
 // fail on a sensor that accepted the partition command.
-func Pair(l *Link, keys HostKeys, fwKey *ecdsa.PublicKey) error {
+//
+// It returns the sensor's ECDH public key, which the host pins
+// (docs/DESIGN.md, finding F1).
+func Pair(l *Link, keys HostKeys, fwKey *ecdsa.PublicKey) ([]byte, error) {
 	fi, err := GetFlashInfo(l)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(fi.Partitions) > 0 {
-		return ErrAlreadyPartitioned
+		return nil, ErrAlreadyPartitioned
 	}
 	ic, ok := LookupFlashIC(fi)
 	if !ok {
-		return fmt.Errorf("unknown flash chip: jedec %04x:%04x, %d x %d bytes",
+		return nil, fmt.Errorf("unknown flash chip: jedec %04x:%04x, %d x %d bytes",
 			fi.JedecID0, fi.JedecID1, fi.Blocks, fi.BlockSize)
 	}
 	l.log.Info("flash chip", "name", ic.Name, "size", ic.Size)
 
 	if err := SendInit(l); err != nil {
-		return fmt.Errorf("start-up: %w", err)
+		return nil, fmt.Errorf("start-up: %w", err)
 	}
 
 	// Everything that can fail without touching the sensor happens
 	// before the partition command.
 	host, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	privBlob, err := EncryptHostKey(host, keys)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	hostCert, err := makeHostCert(&host.PublicKey)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// The reference sends the reset program immediately before
 	// partitioning; what it resets is not documented.
 	if _, err := l.CmdOK(blobReset); err != nil {
-		return fmt.Errorf("reset program: %w", err)
+		return nil, fmt.Errorf("reset program: %w", err)
 	}
 	l.log.Info("partitioning flash")
 	p, err := l.CmdOK(partitionCmd(ic, hostCert))
 	if err != nil {
-		return fmt.Errorf("partition: %w", err)
+		return nil, fmt.Errorf("partition: %w", err)
 	}
 	if len(p) < 4 || int(binary.LittleEndian.Uint32(p)) > len(p)-4 {
-		return fmt.Errorf("partition: certificate reply: %w", ErrShortReply)
+		return nil, fmt.Errorf("partition: certificate reply: %w", ErrShortReply)
 	}
 	tlsCert := append([]byte(nil), p[4:4+binary.LittleEndian.Uint32(p)]...)
 
 	if _, err := GetRomInfo(l); err != nil {
-		return err
+		return nil, err
 	}
 
 	var ecdhReply []byte
@@ -260,35 +263,35 @@ func Pair(l *Link, keys HostKeys, fwKey *ecdsa.PublicKey) error {
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("sensor key: %w", err)
+		return nil, fmt.Errorf("sensor key: %w", err)
 	}
 	if len(ecdhReply) < 4+ecdhReplyTail || int(binary.LittleEndian.Uint32(ecdhReply)) != len(ecdhReply) {
-		return fmt.Errorf("sensor key: %d-byte reply: %w", len(ecdhReply), ErrShortReply)
+		return nil, fmt.Errorf("sensor key: %d-byte reply: %w", len(ecdhReply), ErrShortReply)
 	}
 	if !allZero(ecdhReply[4 : len(ecdhReply)-ecdhReplyTail]) {
-		return errors.New("sensor key: non-zero bytes before the key")
+		return nil, errors.New("sensor key: non-zero bytes before the key")
 	}
 	ecdhBlob := ecdhReply[len(ecdhReply)-ecdhReplyTail:]
 	sensorKey, err := parseECDHBlock(ecdhBlob, fwKey)
 	if err != nil {
-		return fmt.Errorf("sensor key: %w", err)
+		return nil, fmt.Errorf("sensor key: %w", err)
 	}
 
 	sess, err := OpenSession(l, &Pairing{HostKey: host, Cert: tlsCert, SensorKey: sensorKey})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	l.log.Info("session open, erasing partitions")
 	for _, part := range flashLayout {
 		if err := EraseFlash(sess, part.ID); err != nil {
-			return fmt.Errorf("erase partition %d: %w", part.ID, err)
+			return nil, fmt.Errorf("erase partition %d: %w", part.ID, err)
 		}
 	}
 	l.log.Info("writing pairing to the tls partition")
 	if err := WriteFlash(sess, PartitionTLS, 0, makeTLSFlash(privBlob, tlsCert, ecdhBlob)); err != nil {
-		return fmt.Errorf("write tls partition: %w", err)
+		return nil, fmt.Errorf("write tls partition: %w", err)
 	}
-	return Reboot(sess)
+	return sensorKey.Bytes(), Reboot(sess)
 }
 
 // tlsPartitionLen is what the reference writes to the TLS partition: the

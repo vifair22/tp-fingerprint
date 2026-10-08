@@ -2,7 +2,9 @@ package device
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 
 	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
 	"git.airies.net/vifair22/t480-fingerprint/internal/server"
+	"git.airies.net/vifair22/t480-fingerprint/internal/trust"
 	"git.airies.net/vifair22/t480-fingerprint/internal/usbfs"
 	"git.airies.net/vifair22/t480-fingerprint/internal/validity"
 )
@@ -30,9 +33,47 @@ type fakeSensor struct {
 	awake   bool
 	idles   int
 	wakeErr error
+	// key is the sensor's identity for pinning.
+	key string
 }
 
-func newFake() *fakeSensor { return &fakeSensor{users: map[uint16]*validity.User{}, nextID: 10} }
+func newFake() *fakeSensor {
+	return &fakeSensor{users: map[uint16]*validity.User{}, nextID: 10, key: "sensor A"}
+}
+
+// tidOf is the template id the fake gives finger record id.
+func tidOf(id uint16) []byte { return []byte(fmt.Sprintf("tid-%d", id)) }
+
+// fingerRecord lays out a finger record's value as the sensor stores it
+// (validity's fingerData), holding tid.
+func fingerRecord(subtype uint16, tid []byte) []byte {
+	le := binary.LittleEndian
+	tmpl := []byte("template")
+	inner := le.AppendUint16(nil, 1)
+	inner = le.AppendUint16(inner, uint16(len(tmpl)))
+	inner = append(inner, tmpl...)
+	inner = le.AppendUint16(inner, 2)
+	inner = le.AppendUint16(inner, uint16(len(tid)))
+	inner = append(inner, tid...)
+	v := le.AppendUint16(nil, subtype)
+	v = le.AppendUint16(v, 3)
+	v = le.AppendUint16(v, uint16(len(inner)))
+	v = le.AppendUint16(v, 0x20)
+	return append(append(v, inner...), make([]byte, 0x20)...)
+}
+
+func (f *fakeSensor) RecordValue(id uint16) (*validity.Record, error) {
+	for _, u := range f.users {
+		for _, fg := range u.Fingers {
+			if fg.ID == id {
+				return &validity.Record{ID: id, Value: fingerRecord(fg.Subtype, tidOf(id))}, nil
+			}
+		}
+	}
+	return nil, errors.New("no such record")
+}
+
+func (f *fakeSensor) SensorKey() []byte { return []byte(f.key) }
 
 func (f *fakeSensor) add(uid uint32, subtypes ...uint16) *validity.User {
 	u := &validity.User{ID: f.nextID, SID: validity.UIDSID(uid)}
@@ -99,21 +140,35 @@ func (f *fakeSensor) DeleteRecord(id uint16) error {
 	return errors.New("no such record")
 }
 
+// Identify runs the scripted scan; a match that names no template gets the
+// matched finger's, as the sensor reports it.
 func (f *fakeSensor) Identify(ctx context.Context, retry func(error)) (*validity.Match, error) {
 	retry(validity.ErrScan)
-	return f.scan()
+	m, err := f.scan()
+	if m != nil && m.Hash == nil {
+		if u, ok := f.users[m.User]; ok {
+			for _, fg := range u.Fingers {
+				if fg.Subtype == m.Subtype || m.Subtype == 0 {
+					m.Hash, m.Subtype = tidOf(fg.ID), fg.Subtype
+					break
+				}
+			}
+		}
+	}
+	return m, err
 }
 
-func (f *fakeSensor) Enroll(_ context.Context, sid validity.SID, subtype uint16, progress func(validity.EnrollEvent)) (uint16, error) {
+func (f *fakeSensor) Enroll(_ context.Context, sid validity.SID, subtype uint16, progress func(validity.EnrollEvent)) (uint16, []byte, error) {
 	progress(validity.EnrollEvent{Touch: 1})
 	uid, _ := sid.UID()
 	u, _ := f.LookupUser(0, sid)
 	if u == nil {
 		u = f.add(uid)
 	}
-	u.Fingers = append(u.Fingers, validity.Finger{ID: f.nextID, Subtype: subtype})
+	id := f.nextID
+	u.Fingers = append(u.Fingers, validity.Finger{ID: id, Subtype: subtype})
 	f.nextID++
-	return f.nextID - 1, nil
+	return id, tidOf(id), nil
 }
 
 func (f *fakeSensor) Wake() error {
@@ -149,9 +204,12 @@ type rig struct {
 	sleptErr error
 }
 
-func newRig() *rig {
+func newRig(t *testing.T) *rig {
 	r := &rig{at: usbfs.Info{Bus: 1, Addr: 5}, sensor: newFake()}
-	r.d = &Device{cfg: Config{Log: slog.New(slog.DiscardHandler)}, pollEvery: time.Millisecond,
+	dir := t.TempDir()
+	r.d = &Device{cfg: Config{Log: slog.New(slog.DiscardHandler),
+		PinPath: filepath.Join(dir, "sensor-pin"), LedgerPath: filepath.Join(dir, "enrolled")},
+		pollEvery: time.Millisecond,
 		idleGrace: time.Hour, suspendedMs: func(usbfs.Info) (int64, error) { return r.sleptMs, r.sleptErr }}
 	r.d.locate = func() (usbfs.Info, error) {
 		if r.gone {
@@ -176,7 +234,7 @@ func nopErr(int, error) {}
 
 func TestVerify(t *testing.T) {
 	ctx := context.Background()
-	r := newRig()
+	r := newRig(t)
 	me := r.sensor.add(1000, 2)
 	other := r.sensor.add(1001, 7)
 
@@ -212,7 +270,7 @@ func TestVerify(t *testing.T) {
 
 func TestReopenAndDrop(t *testing.T) {
 	ctx := context.Background()
-	r := newRig()
+	r := newRig(t)
 	me := r.sensor.add(1000, 2)
 	r.sensor.scan = func() (*validity.Match, error) { return &validity.Match{User: me.ID}, nil }
 	r.d.Verify(ctx, 1000, nop, nop)
@@ -307,7 +365,7 @@ func TestReopenAndDrop(t *testing.T) {
 
 func TestIdentify(t *testing.T) {
 	ctx := context.Background()
-	r := newRig()
+	r := newRig(t)
 	me := r.sensor.add(1000, 2)
 	foreign := r.sensor.add(0)
 	foreign.SID = validity.SID{Revision: 1, Auth: 5, SubAuth: []uint32{18}}
@@ -326,9 +384,11 @@ func TestIdentify(t *testing.T) {
 			t.Errorf("%s: %v, %v", name, ok, err)
 		}
 	}
+	// A record fpd has no template for matches nobody: whose finger it is
+	// comes from the ledger, not the sensor's say-so.
 	r.sensor.scan = func() (*validity.Match, error) { return &validity.Match{User: 999}, nil }
-	if _, _, err := r.d.Identify(ctx, nop, nop); err == nil {
-		t.Error("match on a missing record")
+	if _, ok, err := r.d.Identify(ctx, nop, nop); ok || err != nil {
+		t.Errorf("match on an unknown record: %v, %v", ok, err)
 	}
 	r.sensor.scan = func() (*validity.Match, error) { return nil, errors.New("usb") }
 	if _, _, err := r.d.Identify(ctx, nop, nop); err == nil {
@@ -345,7 +405,7 @@ func TestIdentify(t *testing.T) {
 // The lock screen asks with no deadline and never asks twice, so its
 // request outlives a suspend: it waits for the sensor to come back.
 func TestNoDeadlineWaitsForTheSensor(t *testing.T) {
-	r := newRig()
+	r := newRig(t)
 	me := r.sensor.add(1000, 2)
 	r.sensor.scan = func() (*validity.Match, error) { return &validity.Match{User: me.ID}, nil }
 
@@ -386,7 +446,7 @@ func TestNoDeadlineWaitsForTheSensor(t *testing.T) {
 
 func TestEnrollListDelete(t *testing.T) {
 	ctx := context.Background()
-	r := newRig()
+	r := newRig(t)
 	r.sensor.add(1001, 7)
 	if err := r.d.Enroll(ctx, 1000, 2, nop, nopErr); err != nil {
 		t.Fatal(err)
@@ -492,7 +552,7 @@ func (r *rig) locked(fn func()) {
 // keeps the session.
 func TestIdleBetweenRequests(t *testing.T) {
 	ctx := context.Background()
-	r := newRig()
+	r := newRig(t)
 	r.d.idleGrace = 5 * time.Millisecond
 	me := r.sensor.add(1000, 2)
 	r.sensor.scan = func() (*validity.Match, error) {
@@ -590,5 +650,132 @@ func TestReadSuspendedMs(t *testing.T) {
 	}
 	if _, err := readSuspendedMs(usbfs.Info{SysPath: t.TempDir()}); err == nil {
 		t.Fatal("read a missing count")
+	}
+}
+
+// F1: a sensor other than the pinned one is refused at once, even by a
+// request with no deadline, which would otherwise wait and reopen.
+func TestPinnedSensor(t *testing.T) {
+	r := newRig(t)
+	me := r.sensor.add(1000, 2)
+	r.sensor.scan = func() (*validity.Match, error) { return &validity.Match{User: me.ID}, nil }
+	if ok, err := r.d.Verify(context.Background(), 1000, nop, nop); err != nil || !ok {
+		t.Fatalf("first use: %v, %v", ok, err)
+	}
+	if b, err := os.ReadFile(r.d.cfg.PinPath); err != nil || len(b) == 0 {
+		t.Fatalf("no pin written: %v", err)
+	}
+
+	// Swap the sensor: the next open sees another key.
+	r.d.drop()
+	r.sensor.key = "sensor B"
+	opens := r.opens
+	_, err := r.d.Verify(context.Background(), 1000, nop, nop)
+	if !errors.Is(err, trust.ErrSensorMismatch) || !errors.Is(err, server.ErrUnavailable) {
+		t.Fatalf("swapped sensor: %v", err)
+	}
+	if r.opens-opens != 1 || !r.sensor.closed {
+		t.Fatalf("%d opens for a swapped sensor, closed %v", r.opens-opens, r.sensor.closed)
+	}
+}
+
+// F2: the ledger is adopted on first use, and a match counts only for a
+// template fpd recorded for that user.
+func TestLedger(t *testing.T) {
+	ctx := context.Background()
+	r := newRig(t)
+	me := r.sensor.add(1000, 2, 7)
+	other := r.sensor.add(1001, 3)
+	foreign := r.sensor.add(0, 5)
+	foreign.SID = validity.SID{Revision: 1, Auth: 5, SubAuth: []uint32{18}}
+	r.sensor.scan = func() (*validity.Match, error) { return &validity.Match{User: me.ID, Subtype: 2}, nil }
+	if ok, err := r.d.Verify(ctx, 1000, nop, nop); err != nil || !ok {
+		t.Fatalf("adopted finger: %v, %v", ok, err)
+	}
+	l, exists, err := trust.LoadLedger(r.d.cfg.LedgerPath)
+	if err != nil || !exists || len(l.Entries()) != 3 {
+		t.Fatalf("adopted ledger: %+v, %v, %v", l.Entries(), exists, err)
+	}
+
+	// The sensor says "your record", but the template is not one fpd
+	// enrolled for this user.
+	r.sensor.scan = func() (*validity.Match, error) {
+		return &validity.Match{User: me.ID, Subtype: 2, Hash: []byte("rogue template")}, nil
+	}
+	if ok, err := r.d.Verify(ctx, 1000, nop, nop); err != nil || ok {
+		t.Fatalf("unknown template: %v, %v", ok, err)
+	}
+	// Nor is another user's template, even claimed under this record.
+	r.sensor.scan = func() (*validity.Match, error) {
+		return &validity.Match{User: me.ID, Hash: tidOf(other.Fingers[0].ID)}, nil
+	}
+	if ok, _ := r.d.Verify(ctx, 1000, nop, nop); ok {
+		t.Fatal("matched on another user's template")
+	}
+
+	// A user the sensor holds but the ledger does not is not enrolled.
+	r.sensor.add(1002, 4)
+	if _, err := r.d.Verify(ctx, 1002, nop, nop); !errors.Is(err, server.ErrNotEnrolled) {
+		t.Fatalf("user missing from the ledger: %v", err)
+	}
+	// Identify names the ledger's owner.
+	r.sensor.scan = func() (*validity.Match, error) { return &validity.Match{User: other.ID}, nil }
+	if e, ok, err := r.d.Identify(ctx, nop, nop); err != nil || !ok || e.UID != 1001 || e.Subtype != 3 {
+		t.Fatalf("identify: %+v, %v, %v", e, ok, err)
+	}
+	// List shows only what the ledger backs: not 1002's finger, nor the
+	// foreign one.
+	if all, _ := r.d.List(proto.AllUsers); len(all) != 3 {
+		t.Fatalf("list: %+v", all)
+	}
+
+	// Enroll records the new template; delete forgets it.
+	if err := r.d.Enroll(ctx, 1000, 9, nop, nopErr); err != nil {
+		t.Fatal(err)
+	}
+	l, _, _ = trust.LoadLedger(r.d.cfg.LedgerPath)
+	if len(l.Entries()) != 4 {
+		t.Fatalf("after enroll: %+v", l.Entries())
+	}
+	if err := r.d.Delete(1000, 9); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.d.Delete(1001, 0); err != nil {
+		t.Fatal(err)
+	}
+	l, _, _ = trust.LoadLedger(r.d.cfg.LedgerPath)
+	if got := l.Entries(); len(got) != 2 || got[0].UID != 1000 || got[1].UID != 1000 {
+		t.Fatalf("after deletes: %+v", got)
+	}
+
+	// An existing ledger is never re-adopted, even if empty.
+	r2 := newRig(t)
+	r2.d.cfg.LedgerPath = filepath.Join(t.TempDir(), "enrolled")
+	empty, _, _ := trust.LoadLedger(r2.d.cfg.LedgerPath)
+	empty.Replace(nil)
+	mine := r2.sensor.add(1000, 2)
+	r2.sensor.scan = func() (*validity.Match, error) { return &validity.Match{User: mine.ID}, nil }
+	if _, err := r2.d.Verify(ctx, 1000, nop, nop); !errors.Is(err, server.ErrNotEnrolled) {
+		t.Fatalf("empty ledger: %v", err)
+	}
+}
+
+func TestAdoptionFailures(t *testing.T) {
+	r := newRig(t)
+	r.sensor.add(1000, 2)
+	r.sensor.failDB = errors.New("db broken")
+	if err := r.d.Warm(); err == nil {
+		t.Fatal("adopted from a broken database")
+	}
+	if _, exists, _ := trust.LoadLedger(r.d.cfg.LedgerPath); exists {
+		t.Fatal("a ledger was written from a failed adoption")
+	}
+	r.sensor.failDB = nil
+	r.sensor.noStorage = true
+	if err := r.d.Warm(); err != nil {
+		t.Fatalf("adoption from an empty database: %v", err)
+	}
+	if l, exists, _ := trust.LoadLedger(r.d.cfg.LedgerPath); !exists || len(l.Entries()) != 0 {
+		t.Fatal("empty database did not give an empty ledger")
 	}
 }

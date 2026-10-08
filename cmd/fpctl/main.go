@@ -25,6 +25,7 @@ import (
 	"git.airies.net/vifair22/t480-fingerprint/internal/fwfetch"
 	"git.airies.net/vifair22/t480-fingerprint/internal/hostid"
 	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
+	"git.airies.net/vifair22/t480-fingerprint/internal/trust"
 	"git.airies.net/vifair22/t480-fingerprint/internal/usbfs"
 	"git.airies.net/vifair22/t480-fingerprint/internal/validity"
 	"git.airies.net/vifair22/t480-fingerprint/internal/version"
@@ -52,6 +53,8 @@ type env struct {
 	http            *http.Client
 	// socket is fpd's; everyday commands go through it when fpd runs.
 	socket string
+	// pinPath and ledgerPath are the host's trust records.
+	pinPath, ledgerPath string
 }
 
 type command struct {
@@ -103,6 +106,8 @@ func main() {
 		firmwareSHA256:  fwfetch.FirmwareSHA256,
 		http:            &http.Client{Timeout: 5 * time.Minute},
 		socket:          proto.DefaultSocket,
+		pinPath:         trust.DefaultPinPath,
+		ledgerPath:      trust.DefaultLedgerPath,
 	}
 	os.Exit(run(e, os.Args[1:]))
 }
@@ -272,7 +277,20 @@ func runPair(e *env, args []string) error {
 		if created {
 			log.Info("created host secret; back it up", "path", *secretPath)
 		}
-		if err := validity.Pair(l, validity.DeriveHostKeys(secret), e.fwKey); err != nil {
+		key, err := validity.Pair(l, validity.DeriveHostKeys(secret), e.fwKey)
+		if err != nil {
+			return err
+		}
+		// A new pairing: pin this sensor, and start a ledger that knows
+		// nothing yet, since the sensor's database is empty.
+		if err := trust.WritePin(e.pinPath, key); err != nil {
+			return err
+		}
+		ledger, _, err := trust.LoadLedger(e.ledgerPath)
+		if err != nil {
+			return err
+		}
+		if err := ledger.Replace(nil); err != nil {
 			return err
 		}
 		fmt.Fprintf(e.stdout, "paired %s; the sensor is rebooting, check it with fpctl status\n", where)
@@ -408,7 +426,7 @@ func runUploadFirmware(e *env, args []string) error {
 	}
 	log := newLogger(e.stderr, *trace)
 	return withSensor(e, log, func(l *validity.Link, where string) error {
-		sess, err := validity.Open(l, validity.DeriveHostKeys(secret), e.fwKey)
+		sess, err := openPaired(e, l, secret)
 		if err != nil {
 			return err
 		}
@@ -460,7 +478,7 @@ func runCalibrate(e *env, args []string) error {
 	}
 	log := newLogger(e.stderr, *trace)
 	return withSensor(e, log, func(l *validity.Link, where string) error {
-		sess, err := validity.Open(l, validity.DeriveHostKeys(secret), e.fwKey)
+		sess, err := openPaired(e, l, secret)
 		if err != nil {
 			return err
 		}
@@ -484,6 +502,37 @@ func runCalibrate(e *env, args []string) error {
 	})
 }
 
+// openPaired opens the session and checks the sensor against the pin, as
+// fpd does on every open (docs/DESIGN.md, finding F1).
+func openPaired(e *env, l *validity.Link, secret []byte) (*validity.Session, error) {
+	sess, err := validity.Open(l, validity.DeriveHostKeys(secret), e.fwKey)
+	if err != nil {
+		return nil, err
+	}
+	adopted, err := trust.CheckPin(e.pinPath, sess.SensorKey())
+	if err != nil {
+		return nil, err
+	}
+	if adopted {
+		fmt.Fprintf(e.stderr, "pinned this sensor on first use (%s)\n", e.pinPath)
+	}
+	return sess, nil
+}
+
+// ledgerDo applies a change to the enrollment ledger, when fpctl drives the
+// sensor itself with fpd stopped. A missing ledger is left for fpd to adopt
+// on its next start rather than created half-filled here.
+func ledgerDo(e *env, change func(*trust.Ledger) error) error {
+	l, exists, err := trust.LoadLedger(e.ledgerPath)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	return change(l)
+}
+
 // openSession opens the paired sensor's session with the secret at path
 // and runs fn over it.
 func openSession(e *env, args sessionArgs, fn func(sess *validity.Session, where string) error) error {
@@ -493,7 +542,7 @@ func openSession(e *env, args sessionArgs, fn func(sess *validity.Session, where
 	}
 	log := newLogger(e.stderr, args.trace)
 	return withSensor(e, log, func(l *validity.Link, where string) error {
-		sess, err := validity.Open(l, validity.DeriveHostKeys(secret), e.fwKey)
+		sess, err := openPaired(e, l, secret)
 		if err != nil {
 			return err
 		}
@@ -652,7 +701,7 @@ func runEnroll(e *env, args []string) error {
 		} else if !errors.Is(err, validity.ErrNoStorage) {
 			return err
 		}
-		_, err := sen.Enroll(ctx, validity.UIDSID(uid), subtype, func(ev validity.EnrollEvent) {
+		fid, tid, err := sen.Enroll(ctx, validity.UIDSID(uid), subtype, func(ev validity.EnrollEvent) {
 			if ev.Err != nil {
 				fmt.Fprintf(e.stdout, "  touch not accepted (%v); try again\n", ev.Err)
 				return
@@ -660,6 +709,11 @@ func runEnroll(e *env, args []string) error {
 			fmt.Fprintf(e.stdout, "  touch %d accepted; lift and touch again\n", ev.Touch)
 		})
 		if err != nil {
+			return err
+		}
+		if err := ledgerDo(e, func(l *trust.Ledger) error {
+			return l.Add(trust.Entry{UID: uid, Subtype: subtype, Record: fid, TID: tid})
+		}); err != nil {
 			return err
 		}
 		fmt.Fprintf(e.stdout, "enrolled %s for %s\n", *finger, username)
@@ -870,12 +924,18 @@ func runDelete(e *env, args []string) error {
 			if err := db.DeleteRecord(u.ID); err != nil {
 				return err
 			}
+			if err := ledgerDo(e, func(l *trust.Ledger) error { return l.Remove(uid, 0) }); err != nil {
+				return err
+			}
 			fmt.Fprintf(e.stdout, "deleted %s and %d enrolled finger(s)\n", username, len(u.Fingers))
 			return nil
 		}
 		for _, f := range u.Fingers {
 			if f.Subtype == subtype {
 				if err := db.DeleteRecord(f.ID); err != nil {
+					return err
+				}
+				if err := ledgerDo(e, func(l *trust.Ledger) error { return l.Remove(uid, subtype) }); err != nil {
 					return err
 				}
 				fmt.Fprintf(e.stdout, "deleted %s's %s\n", username, *finger)
@@ -909,7 +969,7 @@ func runStatus(e *env, args []string) error {
 	}
 	log := newLogger(e.stderr, *trace)
 	return withSensor(e, log, func(l *validity.Link, where string) error {
-		sess, err := validity.Open(l, validity.DeriveHostKeys(secret), e.fwKey)
+		sess, err := openPaired(e, l, secret)
 		if err != nil {
 			return err
 		}

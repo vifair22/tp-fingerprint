@@ -74,13 +74,14 @@ const (
 	ResultCancelled   uint32 = 9
 	ResultExists      uint32 = 10
 	ResultRemote      uint32 = 11
+	ResultLockedOut   uint32 = 12 // too many non-matching fingers lately
 )
 
 // ResultString describes a result code for logs and fpctl.
 func ResultString(r uint32) string {
 	names := []string{"match", "no match", "nothing enrolled", "sensor unavailable",
 		"sensor busy", "timed out", "permission denied", "bad request", "error",
-		"cancelled", "already enrolled", "remote session"}
+		"cancelled", "already enrolled", "remote session", "locked out"}
 	if int(r) < len(names) {
 		return names[r]
 	}

@@ -21,6 +21,7 @@ import (
 	"git.airies.net/vifair22/t480-fingerprint/internal/hostid"
 	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
 	"git.airies.net/vifair22/t480-fingerprint/internal/server"
+	"git.airies.net/vifair22/t480-fingerprint/internal/trust"
 	"git.airies.net/vifair22/t480-fingerprint/internal/usbfs"
 	"git.airies.net/vifair22/t480-fingerprint/internal/validity"
 )
@@ -32,9 +33,12 @@ type sensor interface {
 	LookupUser(storage uint16, sid validity.SID) (*validity.User, error)
 	User(id uint16) (*validity.User, error)
 	Users(*validity.Storage) ([]*validity.User, error)
+	RecordValue(id uint16) (*validity.Record, error)
 	DeleteRecord(id uint16) error
 	Identify(ctx context.Context, retry func(error)) (*validity.Match, error)
-	Enroll(ctx context.Context, sid validity.SID, subtype uint16, progress func(validity.EnrollEvent)) (uint16, error)
+	Enroll(ctx context.Context, sid validity.SID, subtype uint16, progress func(validity.EnrollEvent)) (uint16, []byte, error)
+	// SensorKey is the sensor's ECDH public key, which the host pins.
+	SensorKey() []byte
 	// Wake makes the device usable again after Idle; Idle lets it
 	// autosuspend between requests while the handle stays open.
 	Wake() error
@@ -55,6 +59,10 @@ type Config struct {
 	Log        *slog.Logger
 	// IdleGrace overrides DefaultIdleGrace when not zero.
 	IdleGrace time.Duration
+	// PinPath and LedgerPath hold the host's own record of the sensor it
+	// paired and the fingers it enrolled (internal/trust).
+	PinPath    string
+	LedgerPath string
 }
 
 // Device implements server.Reader.
@@ -82,6 +90,9 @@ type Device struct {
 	sleptAt int64
 	gen     uint64
 	timer   *time.Timer
+	// ledger is loaded on the first open, adopting the sensor's
+	// enrollments if there is no ledger file yet.
+	ledger *trust.Ledger
 }
 
 // maxReopens bounds how often one request reopens the sensor, so a sensor
@@ -153,9 +164,92 @@ func (d *Device) get() (sensor, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", server.ErrUnavailable, err)
 	}
+	if err := d.trust(s); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("%w: %w", server.ErrUnavailable, err)
+	}
 	d.cur, d.at, d.opened = s, info, true
 	d.cfg.Log.Info("sensor open", "bus", info.Bus, "addr", info.Addr)
 	return s, nil
+}
+
+// trust checks a newly opened sensor against the pin, and loads the
+// ledger the first time. A sensor that is not the paired one is refused
+// outright: it may be a swapped or re-provisioned part (finding F1).
+func (d *Device) trust(s sensor) error {
+	adopted, err := trust.CheckPin(d.cfg.PinPath, s.SensorKey())
+	if err != nil {
+		d.cfg.Log.Error("refusing the sensor", "err", err)
+		return err
+	}
+	if adopted {
+		d.cfg.Log.Warn("pinned this sensor on first use", "pin", d.cfg.PinPath)
+	}
+	if d.ledger != nil {
+		return nil
+	}
+	l, exists, err := trust.LoadLedger(d.cfg.LedgerPath)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		entries, err := adopt(s)
+		if err != nil {
+			return fmt.Errorf("adopting the sensor's enrollments: %w", err)
+		}
+		if err := l.Replace(entries); err != nil {
+			return err
+		}
+		d.cfg.Log.Warn("adopted the sensor's enrollments into a new ledger on first use",
+			"fingers", len(entries), "ledger", d.cfg.LedgerPath)
+	}
+	d.ledger = l
+	return nil
+}
+
+// adopt reads every enrolled finger the sensor holds under a uid-mapped
+// SID, for a ledger that does not exist yet (trust on first use).
+func adopt(s sensor) ([]trust.Entry, error) {
+	stg, err := s.Storage()
+	if errors.Is(err, validity.ErrNoStorage) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	users, err := s.Users(stg)
+	if err != nil {
+		return nil, err
+	}
+	var out []trust.Entry
+	for _, u := range users {
+		uid, ok := u.SID.UID()
+		if !ok {
+			continue
+		}
+		for _, f := range u.Fingers {
+			rec, err := s.RecordValue(f.ID)
+			if err != nil {
+				return nil, err
+			}
+			sub, tid, err := validity.ParseFingerData(rec.Value)
+			if err != nil {
+				return nil, fmt.Errorf("finger record %d: %w", f.ID, err)
+			}
+			out = append(out, trust.Entry{UID: uid, Subtype: sub, Record: f.ID, TID: tid})
+		}
+	}
+	return out, nil
+}
+
+// enrolledFor reports whether the ledger holds any finger for uid.
+func (d *Device) enrolledFor(uid uint32) bool {
+	for _, e := range d.ledger.Entries() {
+		if e.UID == uid {
+			return true
+		}
+	}
+	return false
 }
 
 // idle lets the sensor autosuspend once idleGrace passes with no new
@@ -254,6 +348,11 @@ func (d *Device) scan(ctx context.Context, op func(sensor) error) error {
 			d.drop()
 			failedMidway = true
 		}
+		// A sensor that is not the paired one stays that way; every
+		// attempt would only cost it another session.
+		if errors.Is(err, trust.ErrSensorMismatch) {
+			return err
+		}
 		if ctx.Err() != nil || attempt >= maxReopens || (bounded && !failedMidway) {
 			return err
 		}
@@ -304,7 +403,7 @@ func (d *Device) Verify(ctx context.Context, uid uint32, prompt, retry func()) (
 	var matched bool
 	err := d.scan(ctx, func(s sensor) error {
 		_, u, err := user(s, uid)
-		if err == nil && len(u.Fingers) == 0 {
+		if err == nil && (len(u.Fingers) == 0 || !d.enrolledFor(uid)) {
 			err = server.ErrNotEnrolled
 		}
 		if err != nil {
@@ -319,7 +418,13 @@ func (d *Device) Verify(ctx context.Context, uid uint32, prompt, retry func()) (
 		if err != nil {
 			return err
 		}
-		matched = m.User == u.ID
+		// The sensor's word that this is uid's record is not enough: the
+		// template must be one fpd enrolled for uid (finding F2).
+		owner, known := d.ledger.Owner(m.Hash)
+		matched = m.User == u.ID && known && owner.UID == uid
+		if m.User == u.ID && !matched {
+			d.cfg.Log.Warn("refusing a match on a template fpd did not enroll for this user", "uid", uid)
+		}
 		return nil
 	})
 	return matched, err
@@ -342,14 +447,13 @@ func (d *Device) Identify(ctx context.Context, prompt, retry func()) (server.Enr
 		if err != nil {
 			return err
 		}
-		u, err := s.User(m.User)
-		if err != nil {
-			return err
+		// Whose finger it is comes from the ledger, not from the sensor's
+		// database (finding F2).
+		owner, known := d.ledger.Owner(m.Hash)
+		if !known {
+			d.cfg.Log.Warn("match on a template fpd did not enroll", "record", m.User)
 		}
-		uid, ok := u.SID.UID()
-		// A user enrolled by something that does not use our uid
-		// mapping matches nobody we know.
-		who, found = server.Enrolled{UID: uid, Subtype: m.Subtype}, ok
+		who, found = server.Enrolled{UID: owner.UID, Subtype: owner.Subtype}, known
 		return nil
 	})
 	return who, found, err
@@ -377,8 +481,11 @@ func (d *Device) Enroll(ctx context.Context, uid uint32, subtype uint16, prompt 
 		}
 	}
 	prompt()
-	_, err = s.Enroll(ctx, validity.UIDSID(uid), subtype, func(e validity.EnrollEvent) { progress(e.Touch, e.Err) })
-	return d.settle(ctx, err)
+	fid, tid, err := s.Enroll(ctx, validity.UIDSID(uid), subtype, func(e validity.EnrollEvent) { progress(e.Touch, e.Err) })
+	if err != nil {
+		return d.settle(ctx, err)
+	}
+	return d.ledger.Add(trust.Entry{UID: uid, Subtype: subtype, Record: fid, TID: tid})
 }
 
 // List implements server.Reader.
@@ -402,6 +509,12 @@ func (d *Device) List(uid uint32) ([]server.Enrolled, error) {
 	if err != nil {
 		return nil, d.settle(ctx, err)
 	}
+	// Only what fpd enrolled, and the sensor still holds, can
+	// authenticate, so that is what is listed.
+	inLedger := map[uint16]trust.Entry{}
+	for _, e := range d.ledger.Entries() {
+		inLedger[e.Record] = e
+	}
 	var out []server.Enrolled
 	for _, u := range users {
 		id, ok := u.SID.UID()
@@ -409,7 +522,9 @@ func (d *Device) List(uid uint32) ([]server.Enrolled, error) {
 			continue
 		}
 		for _, f := range u.Fingers {
-			out = append(out, server.Enrolled{UID: id, Subtype: f.Subtype})
+			if e, ok := inLedger[f.ID]; ok && e.UID == id {
+				out = append(out, server.Enrolled{UID: id, Subtype: f.Subtype})
+			}
 		}
 	}
 	return out, nil
@@ -430,11 +545,17 @@ func (d *Device) Delete(uid uint32, subtype uint16) error {
 		return d.settle(ctx, err)
 	}
 	if subtype == 0 {
-		return d.settle(ctx, s.DeleteRecord(u.ID))
+		if err := s.DeleteRecord(u.ID); err != nil {
+			return d.settle(ctx, err)
+		}
+		return d.ledger.Remove(uid, 0)
 	}
 	for _, f := range u.Fingers {
 		if f.Subtype == subtype {
-			return d.settle(ctx, s.DeleteRecord(f.ID))
+			if err := s.DeleteRecord(f.ID); err != nil {
+				return d.settle(ctx, err)
+			}
+			return d.ledger.Remove(uid, subtype)
 		}
 	}
 	return server.ErrNotEnrolled
@@ -494,6 +615,8 @@ func (r *real) Shutdown() error {
 func (r *real) Close() error { return r.dev.Close() }
 
 func (r *real) Wake() error { return r.dev.ForbidSuspend() }
+
+func (r *real) SensorKey() []byte { return r.sess.SensorKey() }
 
 func (r *real) Idle() error { return r.dev.AllowSuspend() }
 

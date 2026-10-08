@@ -149,6 +149,10 @@ func (s *Session) Raw(req []byte) ([]byte, error) {
 	return app, nil
 }
 
+// SensorKey is the sensor's static ECDH public key, uncompressed: what the
+// host pins to recognise this sensor (docs/DESIGN.md, finding F1).
+func (s *Session) SensorKey() []byte { return s.pair.SensorKey.Bytes() }
+
 // Cmd is Link.Cmd inside the session.
 func (s *Session) Cmd(req []byte) (Status, []byte, error) { return s.link.retryBusy(s, req) }
 

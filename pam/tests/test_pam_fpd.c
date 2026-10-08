@@ -132,6 +132,7 @@ static void test_results(void **state)
         {FPD_RESULT_BUSY, PAM_AUTHINFO_UNAVAIL},
         {FPD_RESULT_TIMEOUT, PAM_AUTHINFO_UNAVAIL},
         {FPD_RESULT_REMOTE, PAM_AUTHINFO_UNAVAIL},
+        {FPD_RESULT_LOCKED_OUT, PAM_AUTHINFO_UNAVAIL},
         {FPD_RESULT_DENIED, PAM_AUTHINFO_UNAVAIL},
         {200, PAM_AUTHINFO_UNAVAIL},
     };
@@ -143,6 +144,7 @@ static void test_results(void **state)
     }
     assert_non_null(strstr(messages, "error:Fingerprint not recognised"));
     assert_non_null(strstr(syslogged, "sensor busy"));
+    assert_non_null(strstr(messages, "error:Too many unrecognised fingerprints"));
     assert_non_null(strstr(syslogged, "unknown result"));
 }
 

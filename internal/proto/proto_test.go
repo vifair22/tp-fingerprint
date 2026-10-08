@@ -58,6 +58,7 @@ func TestHeaderMatches(t *testing.T) {
 		"FPD_RESULT_CANCELLED":    uint64(ResultCancelled),
 		"FPD_RESULT_EXISTS":       uint64(ResultExists),
 		"FPD_RESULT_REMOTE":       uint64(ResultRemote),
+		"FPD_RESULT_LOCKED_OUT":   uint64(ResultLockedOut),
 	}
 	for name, v := range want {
 		if got := num(name); got != v {

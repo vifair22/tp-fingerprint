@@ -105,6 +105,7 @@ static const char *result_name(uint32_t r)
         "match",       "no match",    "nothing enrolled", "sensor unavailable",
         "sensor busy", "timed out",   "denied",           "bad request",
         "error",       "cancelled",   "already enrolled", "remote session",
+        "locked out",
     };
     return r < sizeof names / sizeof names[0] ? names[r] : "unknown result";
 }
@@ -170,6 +171,8 @@ EXPORT int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const ch
                    "fingerprint for %s: %s", user, result_name(result));
     if (result == FPD_RESULT_NO_MATCH && !c.silent)
         (void)pam_error(pamh, "Fingerprint not recognised");
+    if (result == FPD_RESULT_LOCKED_OUT && !c.silent)
+        (void)pam_error(pamh, "Too many unrecognised fingerprints; use your password");
     return pam_code(result);
 }
 

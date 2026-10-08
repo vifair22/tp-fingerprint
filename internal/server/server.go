@@ -71,6 +71,55 @@ type Server struct {
 
 	busy sync.Mutex
 	wg   sync.WaitGroup
+
+	// Lockout (finding F5 in docs/DESIGN.md): consecutive non-matching
+	// fingers per uid, and until when fingerprint is refused for it.
+	lockMu sync.Mutex
+	misses map[uint32]int
+	locked map[uint32]time.Time
+	now    func() time.Time
+}
+
+// Lockout policy: after LockoutMisses non-matching fingers in a row for a
+// user, fingerprint is refused for LockoutFor (the password still works).
+// Each resume gives the lock screen fresh tries, so without this an
+// attacker with fake prints could keep trying by cycling the lid.
+const (
+	LockoutMisses = 5
+	LockoutFor    = 30 * time.Minute
+)
+
+// lockedOut reports whether uid is locked out now.
+func (s *Server) lockedOut(uid uint32) bool {
+	s.lockMu.Lock()
+	defer s.lockMu.Unlock()
+	until, ok := s.locked[uid]
+	if ok && s.now().Before(until) {
+		return true
+	}
+	delete(s.locked, uid)
+	return false
+}
+
+// miss counts a non-matching finger for uid and reports whether that
+// locked it out.
+func (s *Server) miss(uid uint32) bool {
+	s.lockMu.Lock()
+	defer s.lockMu.Unlock()
+	s.misses[uid]++
+	if s.misses[uid] < LockoutMisses {
+		return false
+	}
+	s.misses[uid] = 0
+	s.locked[uid] = s.now().Add(LockoutFor)
+	return true
+}
+
+// matched clears uid's count of misses.
+func (s *Server) matched(uid uint32) {
+	s.lockMu.Lock()
+	defer s.lockMu.Unlock()
+	delete(s.misses, uid)
 }
 
 // New returns a Server for r. remote decides whether a caller's session is
@@ -79,7 +128,8 @@ func New(r Reader, log *slog.Logger, remote func(pid int32) bool) *Server {
 	if remote == nil {
 		remote = func(int32) bool { return false }
 	}
-	return &Server{reader: r, log: log, remote: remote, peer: peerCred}
+	return &Server{reader: r, log: log, remote: remote, peer: peerCred,
+		misses: map[uint32]int{}, locked: map[uint32]time.Time{}, now: time.Now}
 }
 
 // Serve accepts connections until ln is closed, then waits for the ones in
@@ -260,7 +310,15 @@ func (s *Server) verify(ctx context.Context, c *conn, req proto.Frame) {
 		c.result(proto.ResultDenied)
 		return
 	}
-	if !s.touchAllowed(c) || !s.claim(c) {
+	if !s.touchAllowed(c) {
+		return
+	}
+	if s.lockedOut(uid) {
+		c.log.Warn("fingerprint locked out after repeated misses", "for", uid)
+		c.result(proto.ResultLockedOut)
+		return
+	}
+	if !s.claim(c) {
 		return
 	}
 	defer s.busy.Unlock()
@@ -275,9 +333,16 @@ func (s *Server) verify(ctx context.Context, c *conn, req proto.Frame) {
 			s.fail(ctx, c, "verify", err)
 			return
 		case ok:
+			s.matched(uid)
 			c.result(proto.ResultMatch)
 			return
-		case try >= tries:
+		}
+		if s.miss(uid) {
+			c.log.Warn("locking out fingerprint after repeated misses", "for", uid, "minutes", LockoutFor.Minutes())
+			c.result(proto.ResultLockedOut)
+			return
+		}
+		if try >= tries {
 			c.result(proto.ResultNoMatch)
 			return
 		}

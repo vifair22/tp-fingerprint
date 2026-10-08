@@ -46,5 +46,6 @@
 #define FPD_RESULT_CANCELLED 9U
 #define FPD_RESULT_EXISTS 10U
 #define FPD_RESULT_REMOTE 11U
+#define FPD_RESULT_LOCKED_OUT 12U /* too many non-matching fingers lately */
 
 #endif /* FPD_PROTO_H */

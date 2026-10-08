@@ -49,7 +49,7 @@ func pairedSim(t *testing.T) (*simSensor, *Session) {
 	s := newSimSensor(t)
 	keys := DeriveHostKeys(nil)
 	fw := &s.tls.f.fw.PublicKey
-	if err := Pair(s.link(), keys, fw); err != nil {
+	if _, err := Pair(s.link(), keys, fw); err != nil {
 		t.Fatal(err)
 	}
 	sess, err := Open(s.link(), keys, fw)

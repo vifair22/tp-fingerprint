@@ -360,8 +360,12 @@ func TestPairThenOpen(t *testing.T) {
 	keys := DeriveHostKeys(bytes.Repeat([]byte{0x42}, 32))
 	fw := &s.tls.f.fw.PublicKey
 	l := s.link()
-	if err := Pair(l, keys, fw); err != nil {
+	key, err := Pair(l, keys, fw)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Equal(key, s.tls.f.sensor.PublicKey().Bytes()) {
+		t.Fatal("Pair did not return the sensor's ECDH key")
 	}
 	want := []string{
 		"3e", "01", "19", "4302", "init", "clean-slate", "reset", "4f", "01", "50", "1a",
@@ -407,7 +411,7 @@ func TestPairThenOpen(t *testing.T) {
 	if _, err := Open(s.link(), other, fw); !errors.Is(err, ErrForeignPairing) {
 		t.Fatalf("open under another identity: %v", err)
 	}
-	if err := Pair(s.link(), keys, fw); !errors.Is(err, ErrAlreadyPartitioned) {
+	if _, err := Pair(s.link(), keys, fw); !errors.Is(err, ErrAlreadyPartitioned) {
 		t.Fatalf("pairing twice: %v", err)
 	}
 }
@@ -429,7 +433,7 @@ func TestPairFailures(t *testing.T) {
 		t.Run(step, func(t *testing.T) {
 			s := newSimSensor(t)
 			s.fail = step
-			if err := Pair(s.link(), DeriveHostKeys(nil), &s.tls.f.fw.PublicKey); err == nil {
+			if _, err := Pair(s.link(), DeriveHostKeys(nil), &s.tls.f.fw.PublicKey); err == nil {
 				t.Fatal("pairing succeeded")
 			}
 		})
@@ -437,7 +441,7 @@ func TestPairFailures(t *testing.T) {
 	t.Run("unknown flash chip", func(t *testing.T) {
 		s := newSimSensor(t)
 		s.ic.JedecID0 = 0x99
-		err := Pair(s.link(), DeriveHostKeys(nil), &s.tls.f.fw.PublicKey)
+		_, err := Pair(s.link(), DeriveHostKeys(nil), &s.tls.f.fw.PublicKey)
 		if err == nil || !strings.Contains(err.Error(), "unknown flash chip") {
 			t.Fatalf("err = %v", err)
 		}
@@ -445,7 +449,7 @@ func TestPairFailures(t *testing.T) {
 	t.Run("sensor key not signed by the firmware key", func(t *testing.T) {
 		s := newSimSensor(t)
 		other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		err := Pair(s.link(), DeriveHostKeys(nil), &other.PublicKey)
+		_, err := Pair(s.link(), DeriveHostKeys(nil), &other.PublicKey)
 		if err == nil || !strings.Contains(err.Error(), "does not verify") {
 			t.Fatalf("err = %v", err)
 		}
@@ -460,7 +464,7 @@ func TestOpenFailures(t *testing.T) {
 		t.Run(step, func(t *testing.T) {
 			s := newSimSensor(t)
 			keys := DeriveHostKeys(nil)
-			if err := Pair(s.link(), keys, &s.tls.f.fw.PublicKey); err != nil {
+			if _, err := Pair(s.link(), keys, &s.tls.f.fw.PublicKey); err != nil {
 				t.Fatal(err)
 			}
 			s.fail = step
@@ -551,5 +555,46 @@ func TestFactoryReset(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// A sensor still holding a session the host gave up on refuses the first
+// plaintext command with 0x0315, which ends that session; Open retries.
+func TestOpenRetriesAfterSessionActive(t *testing.T) {
+	s := newSimSensor(t)
+	keys := DeriveHostKeys(nil)
+	fw := &s.tls.f.fw.PublicKey
+	if _, err := Pair(s.link(), keys, fw); err != nil {
+		t.Fatal(err)
+	}
+	refused := false
+	orig := s.tls.plain
+	s.tls.plain = func(req []byte) []byte {
+		if req[0] == 0x3e && !refused {
+			refused = true
+			return []byte{0x15, 0x03}
+		}
+		return orig(req)
+	}
+	sess, err := Open(s.link(), keys, fw)
+	if err != nil || !refused {
+		t.Fatalf("open after a refusal: %v (refused %v)", err, refused)
+	}
+	if !bytes.Equal(sess.SensorKey(), s.tls.f.sensor.PublicKey().Bytes()) {
+		t.Fatal("SensorKey is not the sensor's ECDH key")
+	}
+	// A second refusal in a row is not retried again.
+	s.tls.endSession()
+	s.tls.plain = func(req []byte) []byte {
+		if req[0] == 0x3e {
+			return []byte{0x15, 0x03}
+		}
+		return orig(req)
+	}
+	if _, err := Open(s.link(), keys, fw); err == nil {
+		t.Fatal("opened through repeated refusals")
+	}
+	if StatusSessionActive.String() != "session active" {
+		t.Fatal(StatusSessionActive.String())
 	}
 }

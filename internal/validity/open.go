@@ -15,6 +15,13 @@ var ErrNotPaired = errors.New("sensor is not paired")
 // identity the sensor was paired under; ErrForeignPairing means another.
 func Open(l *Link, keys HostKeys, fwKey *ecdsa.PublicKey) (*Session, error) {
 	fi, err := GetFlashInfo(l)
+	var se *StatusError
+	if errors.As(err, &se) && se.Status == StatusSessionActive {
+		// The sensor still held a session the host had given up on. The
+		// refusal ended it, so the same command now goes through.
+		l.log.Info("sensor still held a session; it ended with the refusal, retrying")
+		fi, err = GetFlashInfo(l)
+	}
 	if err != nil {
 		return nil, err
 	}

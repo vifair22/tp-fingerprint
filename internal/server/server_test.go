@@ -469,3 +469,52 @@ func TestTimeouts(t *testing.T) {
 		t.Errorf("identify without a deadline: %s", proto.ResultString(got))
 	}
 }
+
+// F5: five misses in a row lock fingerprint out for the user, a match
+// clears the count, and the lock lifts after LockoutFor.
+func TestLockout(t *testing.T) {
+	enrolled := map[uint32][]uint16{1000: {2}, 1001: {2}}
+	r := &fakeReader{enrolled: enrolled}
+	h := newHarness(r)
+	clock := time.Unix(1000, 0)
+	h.s.now = func() time.Time { return clock }
+	miss := func(n int) []outcome { return make([]outcome, n) }
+	verify := func(uid, tries uint32) uint32 {
+		return result(t, h.do(t, uid, proto.ReqVerify, verifyReq(uid, 0, tries)))
+	}
+
+	// Four misses, then a match: the count starts over.
+	r.outcomes = append(miss(4), outcome{match: true})
+	if got := verify(1000, 5); got != proto.ResultMatch {
+		t.Fatalf("match after four misses: %s", proto.ResultString(got))
+	}
+	// Three misses in one request, two in the next: locked out on the
+	// fifth, before that request's tries run out.
+	r.outcomes = miss(3)
+	if got := verify(1000, 3); got != proto.ResultNoMatch {
+		t.Fatalf("three misses: %s", proto.ResultString(got))
+	}
+	r.outcomes = miss(3)
+	calls := r.calls
+	if got := verify(1000, 3); got != proto.ResultLockedOut || r.calls-calls != 2 {
+		t.Fatalf("fifth miss: %s after %d scans", proto.ResultString(got), r.calls-calls)
+	}
+	// Locked out: refused without scanning; another user is unaffected.
+	calls = r.calls
+	if got := verify(1000, 3); got != proto.ResultLockedOut || r.calls != calls {
+		t.Fatalf("while locked out: %s, %d scans", proto.ResultString(got), r.calls-calls)
+	}
+	r.outcomes = []outcome{{match: true}}
+	if got := verify(1001, 3); got != proto.ResultMatch {
+		t.Fatalf("other user: %s", proto.ResultString(got))
+	}
+	// The lock lifts after LockoutFor.
+	clock = clock.Add(LockoutFor + time.Second)
+	r.outcomes = []outcome{{match: true}}
+	if got := verify(1000, 3); got != proto.ResultMatch {
+		t.Fatalf("after the lockout: %s", proto.ResultString(got))
+	}
+	if proto.ResultString(proto.ResultLockedOut) != "locked out" {
+		t.Fatal(proto.ResultString(proto.ResultLockedOut))
+	}
+}
