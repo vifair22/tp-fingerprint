@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"git.airies.net/vifair22/t480-fingerprint/internal/atomicfile"
 	"git.airies.net/vifair22/t480-fingerprint/internal/fwfetch"
 	"git.airies.net/vifair22/t480-fingerprint/internal/hostid"
 	"git.airies.net/vifair22/t480-fingerprint/internal/usbfs"
@@ -62,6 +63,7 @@ func init() {
 		{"factory-reset", "wipe the sensor's pairing and enrolled prints", factoryResetUsage, runFactoryReset},
 		{"fetch-firmware", "extract the sensor firmware from Lenovo's driver package", fetchFirmwareUsage, runFetchFirmware},
 		{"upload-firmware", "write the firmware to a paired sensor", uploadFirmwareUsage, runUploadFirmware},
+		{"calibrate", "calibrate the sensor and store the result", calibrateUsage, runCalibrate},
 		{"version", "print the version", "usage: fpctl version\n", runVersion},
 		{"help", "show help for a command", "usage: fpctl help [command]\n", runHelp},
 	}
@@ -296,8 +298,11 @@ func runFactoryReset(e *env, args []string) error {
 	})
 }
 
-// defaultFirmwarePath keeps the firmware beside the host secret.
-const defaultFirmwarePath = "/var/lib/fpd/" + validity.FirmwareName
+// The firmware and calibration data live beside the host secret.
+const (
+	defaultFirmwarePath = "/var/lib/fpd/" + validity.FirmwareName
+	defaultCalibPath    = "/var/lib/fpd/calib-data.bin"
+)
 
 const fetchFirmwareUsage = `usage: fpctl fetch-firmware [--installer PATH] [--out PATH] [--innoextract PATH]
 
@@ -405,6 +410,63 @@ func runUploadFirmware(e *env, args []string) error {
 		}
 		fmt.Fprintf(e.stdout, "loaded firmware %d.%d (built %s, %d modules) on %s; the sensor is rebooting\n",
 			fi.Major, fi.Minor, unixDate(fi.BuildTime), len(fi.Modules), where)
+		return nil
+	})
+}
+
+const calibrateUsage = `usage: fpctl calibrate [--force] [--calib PATH] [--secret PATH] [--trace]
+
+Opens the sensor and calibrates it if needed: when the saved calibration
+data exists and the sensor's calibration partition holds a valid blank
+image, nothing is done. Otherwise it runs three calibration captures and a
+blank capture (keep fingers off the sensor), writes the blank image to the
+sensor's calibration partition, and saves the calibration data.
+
+  --force         recalibrate from scratch even if nothing is missing
+  --calib PATH    calibration data (default ` + defaultCalibPath + `)
+  --secret PATH   host secret (default ` + hostid.DefaultPath + `)
+  --trace         log every command and reply in hex to stderr
+`
+
+func runCalibrate(e *env, args []string) error {
+	fs := flag.NewFlagSet("calibrate", flag.ContinueOnError)
+	force := fs.Bool("force", false, "")
+	calibPath := fs.String("calib", defaultCalibPath, "")
+	secretPath := fs.String("secret", hostid.DefaultPath, "")
+	trace := fs.Bool("trace", false, "")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	secret, err := hostid.Load(*secretPath)
+	if err != nil {
+		return err
+	}
+	saved, err := os.ReadFile(*calibPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	log := newLogger(e.stderr, *trace)
+	return withSensor(e, log, func(l *validity.Link, where string) error {
+		sess, err := validity.Open(l, validity.DeriveHostKeys(secret), e.fwKey)
+		if err != nil {
+			return err
+		}
+		sen, err := validity.OpenSensor(sess, saved)
+		if err != nil {
+			return err
+		}
+		did, err := sen.Calibrate(context.Background(), *force)
+		if err != nil {
+			return err
+		}
+		if !did {
+			fmt.Fprintln(e.stdout, "calibration is current; nothing to do (use --force to redo it)")
+			return nil
+		}
+		if err := atomicfile.Write(*calibPath, sen.CalibrationData(), 0o600); err != nil {
+			return err
+		}
+		fmt.Fprintf(e.stdout, "calibrated %s; saved %s\n", where, *calibPath)
 		return nil
 	})
 }

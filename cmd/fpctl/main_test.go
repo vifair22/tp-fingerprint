@@ -449,3 +449,33 @@ func TestUploadFirmwareCommand(t *testing.T) {
 		})
 	}
 }
+
+func TestCalibrateCommandErrors(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "secret")
+	os.WriteFile(secret, make([]byte, 32), 0o600)
+	tests := []struct {
+		name string
+		args []string
+		s    *replaySensor
+		want string
+	}{
+		{"missing secret", []string{"--secret", filepath.Join(dir, "nope")}, nil, "host secret"},
+		{"unreadable calibration", []string{"--secret", secret, "--calib", dir}, nil, "is a directory"},
+		{"unpaired sensor", []string{"--secret", secret, "--calib", filepath.Join(dir, "c")},
+			&replaySensor{replies: []string{flashUnpartitioned}}, "not paired"},
+		{"bad flag", []string{"--nope"}, nil, "usage: fpctl calibrate"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var open func() (sensor, string, error)
+			if tt.s != nil {
+				open = opener(tt.s)
+			}
+			code, _, errOut := runWith(t, open, append([]string{"calibrate"}, tt.args...)...)
+			if code != 1 || !strings.Contains(errOut, tt.want) {
+				t.Fatalf("exit %d, stderr %q, want %q", code, errOut, tt.want)
+			}
+		})
+	}
+}

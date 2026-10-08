@@ -10,6 +10,7 @@
 package validity
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -25,11 +26,21 @@ const (
 )
 
 // Endpoints. Commands go out on epCmdOut and their replies come back on
-// epCmdIn; epData and epInterrupt carry image data and finger events,
-// which later stages use.
+// epCmdIn. epData carries raw frames during calibration, epInterrupt the
+// capture and enrollment events.
 const (
-	epCmdOut uint8 = 0x01
-	epCmdIn  uint8 = 0x81
+	epCmdOut    uint8 = 0x01
+	epCmdIn     uint8 = 0x81
+	epData      uint8 = 0x82
+	epInterrupt uint8 = 0x83
+)
+
+// Data and interrupt reads, as the reference's read_82 and wait_int.
+const (
+	dataTimeout = 10 * time.Second
+	maxData     = 1 << 20
+	intPoll     = 100 * time.Millisecond
+	maxInt      = 1024
 )
 
 // The reference's timeout and reply buffer for a command exchange.
@@ -138,6 +149,45 @@ func (l *Link) Raw(req []byte) ([]byte, error) {
 	rsp := append([]byte(nil), l.buf[:n]...)
 	l.log.Debug("cmd <", "data", hex.EncodeToString(rsp))
 	return rsp, nil
+}
+
+// ReadData reads one transfer from the data endpoint.
+func (l *Link) ReadData() ([]byte, error) {
+	buf := make([]byte, maxData)
+	n, err := l.t.Bulk(epData, buf, dataTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("read data: %w", err)
+	}
+	l.log.Debug("data <", "bytes", n)
+	return buf[:n], nil
+}
+
+// WaitInt waits for the next interrupt from the sensor. It polls in short
+// slices so that cancelling ctx (the user lifting the request, a PAM
+// timeout) takes effect within one slice.
+func (l *Link) WaitInt(ctx context.Context) ([]byte, error) {
+	buf := make([]byte, maxInt)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		n, err := l.t.Bulk(epInterrupt, buf, intPoll)
+		if err == nil {
+			l.log.Debug("int <", "data", hex.EncodeToString(buf[:n]))
+			return append([]byte(nil), buf[:n]...), nil
+		}
+		if !isTimeout(err) {
+			return nil, fmt.Errorf("wait for interrupt: %w", err)
+		}
+	}
+}
+
+// isTimeout reports a transfer that ran out of time, which the transport
+// signals with an error whose Timeout method says so (syscall.Errno's
+// does for ETIMEDOUT).
+func isTimeout(err error) bool {
+	var t interface{ Timeout() bool }
+	return errors.As(err, &t) && t.Timeout()
 }
 
 // Commander runs commands and splits replies into status and payload.

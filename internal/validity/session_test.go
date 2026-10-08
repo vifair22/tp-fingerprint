@@ -31,6 +31,9 @@ type tlsSensor struct {
 
 	pending []byte
 	flights int
+	// data is what the data endpoint returns next; ints queues interrupts.
+	data []byte
+	ints [][]byte
 
 	suite uint16
 	// hostPub checks CertificateVerify; pairing replaces it with the key
@@ -70,8 +73,23 @@ func (s *tlsSensor) pairing(t *testing.T) *Pairing {
 }
 
 func (s *tlsSensor) Bulk(ep uint8, buf []byte, _ time.Duration) (int, error) {
-	if ep == epCmdIn {
+	switch ep {
+	case epCmdIn:
 		return copy(buf, s.pending), nil
+	case epData:
+		if s.data == nil {
+			return 0, timeoutErr{}
+		}
+		n := copy(buf, s.data)
+		s.data = nil
+		return n, nil
+	case epInterrupt:
+		if len(s.ints) == 0 {
+			return 0, timeoutErr{}
+		}
+		n := copy(buf, s.ints[0])
+		s.ints = s.ints[1:]
+		return n, nil
 	}
 	s.flights++
 	var rsp []byte
@@ -91,6 +109,12 @@ func (s *tlsSensor) Bulk(ep uint8, buf []byte, _ time.Duration) (int, error) {
 	s.pending = rsp
 	return len(buf), nil
 }
+
+// timeoutErr is how a transport reports a transfer that timed out.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string { return "timed out" }
+func (timeoutErr) Timeout() bool { return true }
 
 type record struct {
 	t    byte

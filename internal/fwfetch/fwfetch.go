@@ -17,6 +17,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"git.airies.net/vifair22/t480-fingerprint/internal/atomicfile"
 )
 
 // The driver package and its pinned hash, from python-validity's
@@ -138,34 +140,12 @@ func Extract(ctx context.Context, innoextract, installer, name, dir string) (pat
 	return path, cleanup, nil
 }
 
-// Install copies src to dst through a temporary file in dst's directory,
-// synced and renamed into place, so dst is never seen half-written.
+// Install copies src to dst atomically, readable by its owner only (the
+// firmware is proprietary and stays on this machine).
 func Install(src, dst string) error {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	_, err = f.Write(data)
-	if err == nil {
-		err = f.Sync()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		err = os.Rename(tmp, dst)
-	}
-	if err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("install %s: %w", dst, err)
-	}
-	return nil
+	return atomicfile.Write(dst, data, 0o600)
 }

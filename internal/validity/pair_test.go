@@ -30,6 +30,10 @@ type simSensor struct {
 	// command 0x42 has accepted a signature.
 	fwStatus uint32
 	fwSigned bool
+	// captures records every command 0x02; frames, when set, supplies
+	// the data endpoint's reply to each.
+	captures [][]byte
+	frames   func() []byte
 	cmds     []string
 	rebooted int
 }
@@ -77,7 +81,7 @@ func (s *simSensor) plainCmd(req []byte) []byte {
 	case "3e":
 		return concat(ok, s.flashInfo())
 	case "01":
-		return concat(ok, make([]byte, 16))
+		return concat(ok, simROM)
 	case "19", "init", "clean-slate", "reset", "1a":
 		return ok
 	case "4302":
@@ -92,9 +96,7 @@ func (s *simSensor) plainCmd(req []byte) []byte {
 		p := binary.LittleEndian.AppendUint32(nil, uint32(4+zeroes+len(s.tls.f.ecdhBlock)))
 		return concat(ok, p, make([]byte, zeroes), s.tls.f.ecdhBlock)
 	case "40":
-		data := s.parts[req[1]]
-		hdr := binary.LittleEndian.AppendUint32(nil, uint32(len(data)))
-		return concat(ok, hdr, []byte{0, 0}, data)
+		return concat(ok, s.readFlash(req))
 	}
 	s.t.Errorf("sim: unexpected plaintext command %s", n)
 	return statusFail
@@ -109,7 +111,17 @@ func (s *simSensor) sessionCmd(req []byte) []byte {
 	ok := []byte{0, 0}
 	switch req[0] {
 	case 0x01:
-		return concat(ok, make([]byte, 16))
+		return concat(ok, simROM)
+	case 0x02:
+		s.captures = append(s.captures, append([]byte(nil), req...))
+		if s.frames != nil {
+			s.tls.data = s.frames()
+		}
+		return ok
+	case 0x6f:
+		return concat(ok, s.factoryBits())
+	case 0x40:
+		return concat(ok, s.readFlash(req))
 	case 0x1a:
 		return []byte{0x91, 0x04} // nothing to commit
 	case 0x3f:
@@ -147,7 +159,7 @@ func (s *simSensor) sessionCmd(req []byte) []byte {
 		}
 		return ok
 	case 0x75:
-		return concat(ok, make([]byte, 4), []byte{0x0a, 0x00, 0xdb, 0x00})
+		return concat(ok, make([]byte, 4), []byte{0x4a, 0x00, 0x90, 0x01})
 	case 0x42:
 		if n := binary.LittleEndian.Uint16(req[3:]); int(n) != len(req)-5 || n != fwextSignatureLen {
 			s.t.Errorf("sim: signature of %d bytes says %d", len(req)-5, n)
@@ -164,6 +176,50 @@ func (s *simSensor) sessionCmd(req []byte) []byte {
 	}
 	s.t.Errorf("sim: unexpected session command %s", n)
 	return statusFail
+}
+
+// simROM is this T480's ROM info reply: 6.7 build 164, product 0x30.
+var simROM = mustHex("f0b05e54a40000000607013000010000")
+
+// readFlash answers command 0x40 from the stored partitions, with erased
+// (never written) bytes reading 0xff as on the chip.
+func (s *simSensor) readFlash(req []byte) []byte {
+	addr := int(binary.LittleEndian.Uint32(req[5:]))
+	size := int(binary.LittleEndian.Uint32(req[9:]))
+	part := s.parts[req[1]]
+	data := bytes.Repeat([]byte{0xff}, size)
+	if addr < len(part) {
+		copy(data, part[addr:])
+	}
+	hdr := binary.LittleEndian.AppendUint32(nil, uint32(size))
+	return concat(hdr, []byte{0, 0}, data)
+}
+
+// simFactoryValues stands in for the sensor's factory calibration values.
+var simFactoryValues = func() []byte {
+	v := make([]byte, 0x90)
+	for i := range v {
+		v[i] = byte(0x78 + i%13)
+	}
+	return v
+}()
+
+// factoryBits answers command 0x6f with subtags 3 and 7, laid out as the
+// comment in sensor.py shows a real reply.
+func (s *simSensor) factoryBits() []byte {
+	entry := func(sub uint16, val []byte) []byte {
+		h := binary.LittleEndian.AppendUint32(nil, 0)
+		h = binary.LittleEndian.AppendUint16(h, uint16(len(val)))
+		h = binary.LittleEndian.AppendUint16(h, 0x0e)
+		h = binary.LittleEndian.AppendUint16(h, sub)
+		h = binary.LittleEndian.AppendUint16(h, 0x8000)
+		return concat(h, val)
+	}
+	body := binary.LittleEndian.AppendUint32(nil, 7)
+	body = binary.LittleEndian.AppendUint32(body, 2)
+	return concat(body,
+		entry(3, concat([]byte{7, 0, 0, 0}, simFactoryValues)),
+		entry(7, concat([]byte{7, 0, 0, 0}, bytes.Repeat([]byte{0x20}, 0x90))))
 }
 
 func (s *simSensor) flashInfo() []byte {

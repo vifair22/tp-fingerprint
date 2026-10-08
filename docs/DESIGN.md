@@ -1,9 +1,10 @@
 # t480-fingerprint design
 
-Status: **sensor paired, firmware loaded** (2026-10-07). Transport, probe,
-TLS session, pairing, firmware fetch and upload, and factory reset are
-written; all but factory reset have run against the real sensor. Next:
-enroll, identify, delete (the sensor's database, `db.py`). This file records the
+Status: **sensor paired, firmware loaded, calibrated** (2026-10-07).
+Transport, probe, TLS session, pairing, firmware fetch and upload,
+calibration and factory reset are written; all but factory reset have run
+against the real sensor. Next: the sensor's database (`db.py`), then
+capture, enroll and identify. This file records the
 decisions made before the first line was written, so the implementation
 starts from them rather than rediscovering them, and what the real sensor
 has shown since.
@@ -126,6 +127,35 @@ After the reboot (re-enumerated again, address 5 to 6) `fpctl status`
 opened a session at the first attempt and listed the same firmware. Its
 modules are the types and subtypes in the reference's annotated `43 02`
 reply, at newer versions.
+
+## Sensor model and calibration (2026-10-07)
+
+Identify (`75`) reports hardware 0x190 version 0x4a: `57K0 FM-3367-001`,
+sensor type 0x199, one of the two types the reference has constants for
+and a "line update type 1" device. Exactly one capture program in the
+reference's generated tables applies (ROM major 6, type 0x199, 648 bytes);
+it is the only one carried.
+
+The capture command (`02`) is built by patching that program: the timeslot
+table's Call repeats and addresses, the key calibration line spliced in,
+the factory value written into the last `0x8000203c` register write, and
+the line update tables. The port is held byte for byte to the reference by
+`internal/validity/testdata/sensor_vectors.json`, which
+`gen_sensor_vectors.py` produces by running python-validity's own `Sensor`
+code with pyusb stubbed out.
+
+Calibration data is kept in `/var/lib/fpd/calib-data.bin` (decided
+2026-10-07), not in a tmpfs as the reference does. The reference therefore
+recalibrates at every boot and, since each blank image differs slightly,
+erases and rewrites flash partition 6 every time. Here the sensor is
+calibrated once; each later start checks partition 6's hash and skips the
+captures when it is valid. `fpctl calibrate --force` redoes it.
+
+First calibration on the real sensor: each of the four captures returned
+exactly (3 x 224 + 1) x 120 = 80,760 bytes, the line count the command
+asks for. The 13,440-byte calibration data averages +0.52 as signed
+corrections (range -37 to +111). A second run found everything current
+and captured nothing.
 
 ## Pairing identity (decided 2026-10-07)
 
