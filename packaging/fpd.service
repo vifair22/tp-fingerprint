@@ -3,12 +3,13 @@
 # The sandbox gives it what it needs and nothing else: the USB device
 # nodes, its socket directory under /run, its state under /var/lib/fpd,
 # read access to /proc and /run/systemd/sessions (for the remote-session
-# check), and no capabilities, since everything it opens is owned by root.
+# check), the system bus (fprintd's API for System Settings), and no
+# capabilities, since everything it opens is owned by root.
 
 [Unit]
 Description=Fingerprint daemon for the T480 sensor
 Documentation=https://git.airies.net/vifair22/t480-fingerprint
-After=systemd-udevd.service
+After=systemd-udevd.service dbus.service
 
 [Service]
 Type=simple

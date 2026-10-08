@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -41,7 +43,12 @@ func TestServeLifecycle(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&logs, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error)
-	go func() { done <- serve(ctx, log, sock, r, nil) }()
+	var started, stopped bool
+	bus := func(*slog.Logger, server.Reader, *server.Server) func() {
+		started = true
+		return func() { stopped = true }
+	}
+	go func() { done <- serve(ctx, log, sock, r, nil, bus) }()
 
 	var c net.Conn
 	var err error
@@ -70,6 +77,9 @@ func TestServeLifecycle(t *testing.T) {
 	}
 	if !r.closed {
 		t.Error("sensor not shut down")
+	}
+	if !started || !stopped {
+		t.Errorf("D-Bus API started %v, stopped %v", started, stopped)
 	}
 	if _, err := os.Stat(sock); !errors.Is(err, os.ErrNotExist) {
 		t.Error("socket left behind")
@@ -103,7 +113,7 @@ func TestListen(t *testing.T) {
 	if _, err := listen(filepath.Join(file, "s")); err == nil {
 		t.Fatal("listened under a regular file")
 	}
-	if err := serve(context.Background(), slog.New(slog.DiscardHandler), file, &stubReader{}, nil); err == nil {
+	if err := serve(context.Background(), slog.New(slog.DiscardHandler), file, &stubReader{}, nil, nil); err == nil {
 		t.Fatal("served on a regular file")
 	}
 }
@@ -127,5 +137,30 @@ func TestRunArgs(t *testing.T) {
 	os.WriteFile(file, nil, 0o600)
 	if code := run([]string{"--socket", file}, &out); code != 1 {
 		t.Fatalf("bad socket: exit %d", code)
+	}
+}
+
+func TestLookupUID(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Skip(err)
+	}
+	uid, err := lookupUID(me.Username)
+	if err != nil || strconv.FormatUint(uint64(uid), 10) != me.Uid {
+		t.Fatalf("%d, %v", uid, err)
+	}
+	if _, err := lookupUID("no-such-user-at-all"); err == nil {
+		t.Fatal("found a missing user")
+	}
+}
+
+// Without a reachable system bus, fpd carries on without the D-Bus API.
+func TestStartFprintWithoutABus(t *testing.T) {
+	t.Setenv("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/nonexistent/bus")
+	var logs bytes.Buffer
+	stop := startFprint(slog.New(slog.NewTextHandler(&logs, nil)), &stubReader{}, nil)
+	stop()
+	if !strings.Contains(logs.String(), "not serving the fprintd D-Bus API") {
+		t.Fatalf("log %q", logs.String())
 	}
 }

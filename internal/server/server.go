@@ -240,6 +240,16 @@ func (s *Server) handle(ctx context.Context, nc net.Conn) {
 // only for themselves.
 func allowed(p Peer, uid uint32) bool { return p.UID == 0 || p.UID == uid }
 
+// Acquire takes the sensor for an in-process caller (the fprintd D-Bus
+// service) on the same terms as a socket request: at once or not at all,
+// so the two can never drive the sensor together.
+func (s *Server) Acquire() (release func(), ok bool) {
+	if !s.busy.TryLock() {
+		return nil, false
+	}
+	return s.busy.Unlock, true
+}
+
 // claim takes the sensor, or reports BUSY: a second caller falls back to
 // its password at once rather than waiting, as fprintd's claim does.
 func (s *Server) claim(c *conn) bool {

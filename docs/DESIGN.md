@@ -1,12 +1,14 @@
 # t480-fingerprint design
 
-Status: **installed locally and unlocking the Plasma lock screen**
+Status: **installed locally; fingerprint unlocks the lock screen and
+1Password, and enrolls from System Settings**
 (2026-10-07). fpd runs as a sandboxed systemd service; pam_fpd.so is wired
 into `kde-fingerprint` and `sudo`. Everything has run against the real
 sensor except factory reset (fakes only) and the three-wrong-tries ending
 (tests only). Fingerprint unlocks the lock screen (across suspend) and
-1Password through polkit. Hardware tampering evaluated (see "Threat
-model"); its fixes are scoped into phase 2. Next: phase 2. This file records the
+1Password through polkit. Hardware tampering evaluated and its
+fixes in (see "Threat model"). Phase 2 (System Settings) works. Next: the
+ebuild in vifair-overlay. This file records the
 decisions made before the first line was written, so the implementation
 starts from them rather than rediscovering them, and what the real sensor
 has shown since.
@@ -483,6 +485,21 @@ overshoots.
 Order of work: the tampering fixes F1, F2, F4, F5 and the `0x0315` re-open
 retry first (done 2026-10-08), then the D-Bus service, then a test from
 System Settings, then the ebuild.
+
+Done 2026-10-08: `internal/fprint` serves the API above from inside fpd
+(`--no-dbus` turns it off; without a bus or with the name taken fpd runs
+on without it). It takes the sensor through the socket server's lock, so a
+D-Bus enrollment and a lock-screen or sudo request never run together; the
+second gets busy. A claim is held per bus connection and released when the
+connection leaves the bus. Enrolling an enrolled finger replaces it, as
+fprintd does. `packaging/net.reactivated.Fprint.conf` lets root own the
+name and anyone call it. Tests run the service on a private `dbus-daemon`.
+golang.org/x/sys v0.27.0 came in as godbus's own dependency.
+
+On the real machine, from System Settings (Plasma 6.7.5): the dialog
+listed the right index finger, re-enrolling it replaced the template
+(record 5 kept, tid `ca3d6368...` became `035655ba...` in the ledger), and
+the lock screen then unlocked with the new template.
 
 ## Project conventions
 

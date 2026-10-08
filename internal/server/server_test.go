@@ -518,3 +518,21 @@ func TestLockout(t *testing.T) {
 		t.Fatal(proto.ResultString(proto.ResultLockedOut))
 	}
 }
+
+func TestAcquire(t *testing.T) {
+	h := newHarness(&fakeReader{enrolled: map[uint32][]uint16{1000: {2}}})
+	release, ok := h.s.Acquire()
+	if !ok {
+		t.Fatal("could not acquire an idle sensor")
+	}
+	if _, ok := h.s.Acquire(); ok {
+		t.Fatal("acquired twice")
+	}
+	if got := result(t, h.do(t, 1000, proto.ReqList, proto.U32s(1000))); got != proto.ResultBusy {
+		t.Fatalf("socket request while acquired: %s", proto.ResultString(got))
+	}
+	release()
+	if got := result(t, h.do(t, 1000, proto.ReqList, proto.U32s(1000))); got != proto.ResultMatch {
+		t.Fatalf("after release: %s", proto.ResultString(got))
+	}
+}

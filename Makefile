@@ -28,6 +28,7 @@ SBINDIR := $(PREFIX)/sbin
 BINDIR  := $(PREFIX)/bin
 PAMDIR  := $(PREFIX)/lib64/security
 UNITDIR ?= /etc/systemd/system
+DBUSDIR ?= /etc/dbus-1/system.d
 
 all: release
 
@@ -75,11 +76,13 @@ install:
 	install -d $(DESTDIR)$(UNITDIR)
 	sed 's|@SBINDIR@|$(SBINDIR)|' packaging/fpd.service > $(DESTDIR)$(UNITDIR)/fpd.service
 	chmod 0644 $(DESTDIR)$(UNITDIR)/fpd.service
+	install -D -m 0644 packaging/net.reactivated.Fprint.conf $(DESTDIR)$(DBUSDIR)/net.reactivated.Fprint.conf
 
 # Leaves /var/lib/fpd alone: the host secret and calibration are state.
 uninstall:
 	rm -f $(DESTDIR)$(SBINDIR)/fpd $(DESTDIR)$(BINDIR)/fpctl \
-	    $(DESTDIR)$(PAMDIR)/pam_fpd.so $(DESTDIR)$(UNITDIR)/fpd.service
+	    $(DESTDIR)$(PAMDIR)/pam_fpd.so $(DESTDIR)$(UNITDIR)/fpd.service \
+	    $(DESTDIR)$(DBUSDIR)/net.reactivated.Fprint.conf
 
 clean:
 	rm -rf build

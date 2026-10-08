@@ -14,10 +14,15 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"syscall"
 
+	"github.com/godbus/dbus/v5"
+
 	"git.airies.net/vifair22/t480-fingerprint/internal/device"
+	"git.airies.net/vifair22/t480-fingerprint/internal/fprint"
 	"git.airies.net/vifair22/t480-fingerprint/internal/hostid"
 	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
 	"git.airies.net/vifair22/t480-fingerprint/internal/server"
@@ -27,7 +32,7 @@ import (
 	"git.airies.net/vifair22/t480-fingerprint/internal/version"
 )
 
-const usage = `usage: fpd [--socket PATH] [--secret PATH] [--calib PATH] [--idle DURATION] [--debug]
+const usage = `usage: fpd [--socket PATH] [--secret PATH] [--calib PATH] [--idle DURATION] [--no-dbus] [--debug]
 
 Owns the fingerprint sensor and serves requests on a unix socket. Runs as
 root; callers are authorised by their socket credentials.
@@ -38,6 +43,7 @@ root; callers are authorised by their socket credentials.
   --idle DURATION how long the sensor stays awake after a request before
                   USB may suspend it (default 30s); a suspended sensor
                   costs the next request a fresh session, about a second
+  --no-dbus       do not serve fprintd's D-Bus API (System Settings enrollment)
   --debug         log every sensor command and reply
   --version       print the version
 `
@@ -54,6 +60,7 @@ func run(args []string, stderr io.Writer) int {
 	calib := fs.String("calib", "/var/lib/fpd/calib-data.bin", "")
 	debug := fs.Bool("debug", false, "")
 	idle := fs.Duration("idle", device.DefaultIdleGrace, "")
+	noDBus := fs.Bool("no-dbus", false, "")
 	showVersion := fs.Bool("version", false, "")
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
 		if errors.Is(err, flag.ErrHelp) {
@@ -80,7 +87,11 @@ func run(args []string, stderr io.Writer) int {
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	if err := serve(ctx, log, *socket, dev, server.RemoteSession("/proc", "/run")); err != nil {
+	var bus busStarter
+	if !*noDBus {
+		bus = startFprint
+	}
+	if err := serve(ctx, log, *socket, dev, server.RemoteSession("/proc", "/run"), bus); err != nil {
 		log.Error("fpd stopped", "err", err)
 		return 1
 	}
@@ -96,7 +107,42 @@ type reader interface {
 
 // serve listens on socket and serves until ctx ends, then shuts the
 // sensor down.
-func serve(ctx context.Context, log *slog.Logger, socket string, r reader, remote func(int32) bool) error {
+// busStarter starts the fprintd D-Bus API over the server's sensor and
+// returns how to stop it.
+type busStarter func(log *slog.Logger, r server.Reader, s *server.Server) (stop func())
+
+// startFprint serves fprintd's API on the system bus for System Settings.
+// fpd runs without it if the bus or the name is unavailable: PAM goes
+// through the socket and does not need it.
+func startFprint(log *slog.Logger, r server.Reader, s *server.Server) func() {
+	conn, err := dbus.ConnectSystemBus()
+	if err != nil {
+		log.Warn("not serving the fprintd D-Bus API", "err", err)
+		return func() {}
+	}
+	svc := fprint.New(conn, r, s, log, lookupUID)
+	if err := svc.Start(); err != nil {
+		log.Warn("not serving the fprintd D-Bus API", "err", err)
+		conn.Close()
+		return func() {}
+	}
+	log.Info("serving the fprintd D-Bus API", "name", fprint.BusName)
+	return func() {
+		svc.Close()
+		conn.Close()
+	}
+}
+
+func lookupUID(name string) (uint32, error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return 0, err
+	}
+	uid, err := strconv.ParseUint(u.Uid, 10, 32)
+	return uint32(uid), err
+}
+
+func serve(ctx context.Context, log *slog.Logger, socket string, r reader, remote func(int32) bool, bus busStarter) error {
 	ln, err := listen(socket)
 	if err != nil {
 		return err
@@ -108,6 +154,10 @@ func serve(ctx context.Context, log *slog.Logger, socket string, r reader, remot
 		log.Warn("sensor not ready", "err", err)
 	}
 	s := server.New(r, log, remote)
+	if bus != nil {
+		stop := bus(log, r, s)
+		defer stop()
+	}
 	go func() {
 		<-ctx.Done()
 		ln.Close()
