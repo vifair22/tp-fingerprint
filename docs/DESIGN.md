@@ -5,8 +5,8 @@ Status: **installed locally and unlocking the Plasma lock screen**
 into `kde-fingerprint` and `sudo`. Everything has run against the real
 sensor except factory reset (fakes only) and the three-wrong-tries ending
 (tests only). Fingerprint unlocks the lock screen (across suspend) and
-1Password through polkit. Next: the ebuild in vifair-overlay, then phase
-2. This file records the
+1Password through polkit. Hardware tampering evaluated (see "Threat
+model"); its fixes are scoped into phase 2. Next: phase 2. This file records the
 decisions made before the first line was written, so the implementation
 starts from them rather than rediscovering them, and what the real sensor
 has shown since.
@@ -316,6 +316,86 @@ cancelled the scan; `fpctl list` answered at once), and 1Password.
 override of polkit 126's `/usr/lib/pam.d/polkit-1` with `auth sufficient
 .../pam_fpd.so` first.
 
+## Threat model: hardware tampering (evaluated 2026-10-08)
+
+Attacker: physical access to the locked or suspended laptop, possibly
+opening the case. Goal: pass a fingerprint check (lock screen, polkit and
+1Password, sudo if NOPASSWD is ever dropped). Out of scope: an attacker who
+is already root, and attacks on the password.
+
+Already holding: the host key is protected by a random root-only secret,
+not by the DMI identity (Blackwing's 2023 "A Touch of Pwn" bypass of
+Synaptics sensors relied on that derivation); a sensor emulator cannot
+finish the handshake without a Synaptics-signed key's private half; matching
+is on the sensor and no image reaches the host; firmware is Synaptics-signed
+and the uploaded file is pinned; local users act only for themselves and
+remote sessions are refused.
+
+What the probes in `internal/validity/hwprobe_test.go` (build tag
+`hwprobe`) showed on the real sensor:
+
+- A plaintext command sent while a session is up is refused with status
+  `0x0315`, and the sensor drops the session with it. A full re-open
+  (which starts in plaintext) therefore fails once, then works.
+- A ClientHello sent straight into a live session is answered with an
+  alert (record type 0x15), which also ends the session.
+- Every new session costs the sensor memory: about 17 in a row without a
+  reboot and it disconnected itself mid-command and re-enumerated (a crash
+  that amounts to a reset). Suspend resets it too.
+- A USB port reset clears a session; a full open works 0.8 s later.
+- Match results (`60`): after a match, tagged fields 1 (user record),
+  3 (finger), 4 (32 bytes), 2 (varies per match: a score), 5 and 6 (zero).
+  Field 4 is the finger's template id (tid), byte for byte the tid in the
+  finger record, returned to the host by the sensor at enrollment. After a
+  no-match, `60` fails with `0x047a`. Without the `62` cleanup the result
+  persists: the next `5e` is refused with `0x04fc`, and `60` still returns
+  the previous match.
+
+Findings and what is planned for each (implemented with phase 2):
+
+- **F1, no sensor pinning (fix).** The host accepts any Synaptics-signed
+  sensor key, so a second genuine sensor, paired by the attacker with the
+  attacker's finger under the predictable SID and carrying our encrypted
+  host-key blob (readable from our sensor in plaintext), might be swapped
+  in, provided that sensor can be made to trust our public key (its trust
+  anchor is signed with the public `hs_key`; unverified). Fix: pin a hash
+  of the sensor's ECDH public key at pairing (root-only, beside the host
+  secret) and refuse any other.
+- **F2, the sensor's database is trusted (fix).** Fix: a host-side
+  enrollment ledger, root-only: uid, finger, finger record and tid,
+  written when fpd enrolls. A verify must return a tid recorded for that
+  user. An attacker's template has another tid and ours is never visible
+  outside the session and the ledger. Existing enrollments are adopted
+  once from the sensor's records (trust on first use, as root).
+- **F3, replay within a session (residual).** Record MACs cover type,
+  version, length and body with no sequence number (the sensor's protocol),
+  so an implant on the internal USB could replay a recorded reply, and
+  interrupts are plaintext. A fresh session per verify is not viable: the
+  sensor refuses in-place renewal and leaks memory per session; the only
+  safe fresh session is reboot plus reopen, 2 to 3 s. Kept as residual
+  risk, mitigated by rotation (a new session after every 30 s idle sleep
+  and every suspend). An implant in the case could log the keyboard too.
+- **F4, stale match results (hardening).** Safe today: `60` fails after a
+  no-match once `62` has run, and fpd always runs it and checks `5e`'s
+  status. Exploiting the persistence needs F3's replay. Hardening: send
+  `62` before `5e` as well.
+- **F5, unlimited attempts (fix).** Each resume gives the lock screen 3
+  fresh tries, so lid cycling gives unbounded attempts with fake prints.
+  Fix: after 5 consecutive no-matches for a user, refuse fingerprint for 30
+  minutes (password only); a match resets the count.
+- **F6, unauthenticated plaintext commands (accepted).** Factory reset and
+  flash reads need no session. A physical attacker can wipe the pairing
+  (fingerprint is lost, the password remains) and read the encrypted
+  host-key blob (useless without the secret). F1 and F2 close what follows.
+- **F7, fake fingers (accepted).** The sensor's matcher and liveness; F5
+  limits attempts.
+- **F8, the host secret.** Keep an encrypted backup; it is as sensitive as
+  the pairing.
+
+Also fixed with this work: a re-open that meets `0x0315` (the sensor still
+holding a session the host dropped) retries at once instead of failing the
+request.
+
 ## Pairing identity (decided 2026-10-07)
 
 Pairing has the host generate its own P-256 key, encrypt it under keys
@@ -353,9 +433,19 @@ a sensor paired by the reference.
 ## Phase 2: System Settings enrollment
 
 Plasma's lock screen uses PAM only (`kscreenlocker_greet` has no fprintd
-references). Only System Settings' Users page (`kcm_users`) talks to fprintd,
-over the system bus, so enrolling from System Settings needs fpd to serve
-that API:
+references). Only System Settings' Users page (`kcm_users`, which ships in
+plasma-workspace) talks to fprintd, over the system bus, so enrolling from
+System Settings needs fpd to serve that API. Read from its 6.7.5 source
+(2026-10-08): it calls `GetDefaultDevice` (a failure hides the fingerprint
+section), `ListEnrolledFingers(username)` unclaimed (`NoEnrolledPrints`
+means none), then `Claim`, `EnrollStart` or `DeleteEnrolledFinger`,
+`EnrollStop`, `Release` (`AlreadyInUse` on claim is tolerated), reads the
+properties below through `org.freedesktop.DBus.Properties.Get`, and handles
+`EnrollStatus` results `enroll-stage-passed`, the retries
+(`enroll-retry-scan`, `-swipe-too-short`, `-finger-not-centered`,
+`-remove-and-retry`) and the endings (`enroll-completed`, `-failed`,
+`-data-full`, `-disconnected`, `-unknown-error`). It does not call
+`VerifyStart` or `DeleteEnrolledFingers2`. The interface fpd serves:
 
 - `net.reactivated.Fprint.Manager`: `GetDevices`, `GetDefaultDevice`
 - `net.reactivated.Fprint.Device`: `Claim`, `Release`, `EnrollStart`,
@@ -368,7 +458,19 @@ that API:
 Using `github.com/godbus/dbus/v5` (approved 2026-10-07; pure Go, BSD-2),
 estimated 400-600 lines. Authorization without polkit: a caller may enroll or
 delete only their own fingers (the UID the bus reports for the connection);
-operations on other users stay root-only through `fpctl`.
+operations on other users stay root-only, so managing another user's
+fingerprints from System Settings is refused unless it runs as root
+(accepted 2026-10-08 for this single-user machine).
+
+`num-enroll-stages` is reported as 12 (the sensor decides how many touches
+it wants; the first enrollment took 11): stage-passed signals stop after
+the eleventh and completion fills the progress circle, so it never
+overshoots.
+
+Order of work: the tampering fixes F1, F2, F4, F5 and the `0x0315` re-open
+retry first (they change the enrollment and pairing paths phase 2 builds
+on), then the D-Bus service, then a test from System Settings, then the
+ebuild.
 
 ## Project conventions
 
