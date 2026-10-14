@@ -21,6 +21,8 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
+	"git.airies.net/vifair22/t480-fingerprint/internal/crosdev"
+	"git.airies.net/vifair22/t480-fingerprint/internal/crosfp"
 	"git.airies.net/vifair22/t480-fingerprint/internal/device"
 	"git.airies.net/vifair22/t480-fingerprint/internal/fprint"
 	"git.airies.net/vifair22/t480-fingerprint/internal/hostid"
@@ -32,11 +34,14 @@ import (
 	"git.airies.net/vifair22/t480-fingerprint/internal/version"
 )
 
-const usage = `usage: fpd [--socket PATH] [--secret PATH] [--calib PATH] [--idle DURATION] [--no-dbus] [--debug]
+const usage = `usage: fpd [--sensor auto|validity|crosfp] [--socket PATH] [--secret PATH] [--calib PATH] [--idle DURATION] [--no-dbus] [--debug]
 
 Owns the fingerprint sensor and serves requests on a unix socket. Runs as
 root; callers are authorised by their socket credentials.
 
+  --sensor KIND   validity (the T480's Synaptics 06cb:009a), crosfp (a
+                  ChromeOS fingerprint MCU, the C14's), or auto (default):
+                  crosfp when ` + crosfp.DefaultPath + ` exists, else validity
   --socket PATH   where to listen (default ` + proto.DefaultSocket + `)
   --secret PATH   host secret (default ` + hostid.DefaultPath + `)
   --calib PATH    calibration data (default /var/lib/fpd/calib-data.bin)
@@ -55,6 +60,7 @@ func main() {
 func run(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("fpd", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	sensor := fs.String("sensor", "auto", "")
 	socket := fs.String("socket", proto.DefaultSocket, "")
 	secret := fs.String("secret", hostid.DefaultPath, "")
 	calib := fs.String("calib", "/var/lib/fpd/calib-data.bin", "")
@@ -80,11 +86,23 @@ func run(args []string, stderr io.Writer) int {
 	}
 	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: level}))
 
-	dev := device.New(device.Config{
-		SecretPath: *secret, CalibPath: *calib, FwKey: validity.FirmwarePublicKey(),
-		Bus: usbfs.System, Log: log, IdleGrace: *idle,
-		PinPath: trust.DefaultPinPath, LedgerPath: trust.DefaultLedgerPath,
-	})
+	kind, err := chooseSensor(*sensor, crosdev.Present(crosfp.DefaultPath))
+	if err != nil {
+		fmt.Fprintf(stderr, "fpd: %v\n\n%s", err, usage)
+		return 1
+	}
+	var dev reader
+	switch kind {
+	case "crosfp":
+		dev = crosdev.New(crosdev.Config{SecretPath: *secret, Log: log})
+	default:
+		dev = device.New(device.Config{
+			SecretPath: *secret, CalibPath: *calib, FwKey: validity.FirmwarePublicKey(),
+			Bus: usbfs.System, Log: log, IdleGrace: *idle,
+			PinPath: trust.DefaultPinPath, LedgerPath: trust.DefaultLedgerPath,
+		})
+	}
+	log.Info("sensor", "kind", kind)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	var bus busStarter
@@ -96,6 +114,21 @@ func run(args []string, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// chooseSensor resolves --sensor: auto picks a fingerprint MCU when one is
+// present, since a machine has one sensor or the other.
+func chooseSensor(flagValue string, crosPresent bool) (string, error) {
+	switch flagValue {
+	case "validity", "crosfp":
+		return flagValue, nil
+	case "auto":
+		if crosPresent {
+			return "crosfp", nil
+		}
+		return "validity", nil
+	}
+	return "", fmt.Errorf("unknown sensor %q", flagValue)
 }
 
 // reader is the device as fpd drives it.

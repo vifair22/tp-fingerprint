@@ -500,6 +500,65 @@ listed the right index finger, re-enrolling it replaced the template
 (record 5 kept, tid `ca3d6368...` became `035655ba...` in the ledger), and
 the lock screen then unlocked with the new template.
 
+## Second sensor: the C14's fingerprint MCU (2026-10-14)
+
+The ThinkPad C14 Chromebook has no USB sensor but a ChromeOS fingerprint
+MCU ("bloonchipper", an STM32F412 driving an FPC sensor, `FPC ` vendor
+`0x20435046`, product 9, model `0x21f`), reached through the kernel's
+cros_ec character device `/dev/cros_fp`. fpd drives it with a second
+backend behind `server.Reader`, so the socket protocol, pam_fpd.so, fpctl's
+client side and the fprintd D-Bus API are unchanged. `--sensor auto` (the
+default) picks it when `/dev/cros_fp` exists; the T480 has none and keeps
+the validity backend.
+
+| Package | What |
+|---|---|
+| `internal/crosfp` | the MCU's host commands and events over the chardev: `CROS_EC_DEV_IOCXCMD_V2` and the fingerprint event mask, in Go with no cgo |
+| `internal/crosfp/crosfptest` | a simulated MCU for tests |
+| `internal/crosdev` | the reader: seed, context, template store, enroll, match |
+
+The MCU is not a sensor the host drives. It captures, enrolls and matches
+itself, and keeps up to `template_max` templates (5 here, 5156 bytes each,
+format 4). It hands each one out encrypted under a key it derives from a
+seed the host sets once per MCU boot and a user context; the host stores
+them and uploads them again after every MCU reset.
+
+Read on the C14 with the firmware it shipped (RW `bloonchipper-v2.0.30778`,
+2026-04-15): `FP_INFO` answers versions 2 and 3 only, `FP_CONTEXT` version
+1 only (asynchronous), `FP_SEED` and `FP_ENC_STATUS` version 0. The GSC
+pairing commands (`FP_ESTABLISH_PAIRING_KEY_*`, `FP_GENERATE_NONCE`,
+`FP_ESTABLISH_SESSION`) are present, but the older seed and context scheme
+is still accepted, and that is what this backend uses.
+
+Decisions:
+
+- **One context for fpd, not one per user.** The MCU holds one user
+  context at a time and setting it clears its templates, while fpd serves
+  every user. So the context is derived from the host secret
+  (`HMAC-SHA256(secret, "fpd crosfp context v1")`) and the owner of each
+  template is kept on the host: one file per finger,
+  `/var/lib/fpd/crosfp/<uid>-<finger>.tpl`, uploaded in uid then finger
+  order, so the MCU's match index names the finger.
+- **The seed** is `HMAC-SHA256(secret, "fpd crosfp seed v1")`, set when the
+  MCU reports none. A seed already set is trusted to be fpd's (a restarted
+  fpd). If someone else set it first, every stored template fails to load:
+  reported, never deleted.
+- **Enroll** repeats `ENROLL_SESSION | ENROLL_IMAGE` and waits for the
+  finger to lift between touches, as ChromeOS's biod does; rejected touches
+  (low quality, immobile, low coverage) are passed to progress as errors,
+  which the fprintd API shows as retry-scan. The new template is read back
+  encrypted with `FP_FRAME` and stored.
+- **Match** handles the MCU refining a template (`MATCH_YES_UPDATED`) by
+  reading it back and storing it again; failing that is logged, not fatal.
+- After each match result fpd waits briefly for the finger to lift, so one
+  touch is not counted twice, and between requests it leaves the MCU in no
+  mode.
+
+Not covered yet: the GSC pairing scheme (binding the template key to the
+Cr50 rather than to the host secret), and the MCU's sensor maintenance
+pass (`FP_MODE_SENSOR_MAINTENANCE`, which counts dead pixels; `errors`
+reads `0x3ff`, "unknown", until one has run).
+
 ## Project conventions
 
 Per the owner's standards: Go modules with the version pinned in `go.mod`,
