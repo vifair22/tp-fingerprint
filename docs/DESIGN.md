@@ -559,6 +559,36 @@ Cr50 rather than to the host secret), and the MCU's sensor maintenance
 pass (`FP_MODE_SENSOR_MAINTENANCE`, which counts dead pixels; `errors`
 reads `0x3ff`, "unknown", until one has run).
 
+### Prompt LED (2026-10-14)
+
+The C14's sensor has no light, so nothing shows when a touch will be read.
+`--prompt-led NAME` (`internal/promptled`) flashes a kernel LED class
+device from the moment a request prompts until it ends: verify, identify
+and enroll, whatever the outcome. On the C14 that is the power LED,
+`chromeos:red:power` (the cros_ec LED driver's name; the LED is white), at
+100 ms on, 100 ms off.
+
+- **The kernel flashes it, not fpd.** fpd selects the `timer` trigger
+  (`ledtrig-timer`, which has to be loaded) and sets the rate; every toggle
+  is a host command to the EC, and only while a request waits.
+- **The resting trigger is put back**, by default the one active when fpd
+  started: `chromeos-auto` on the C14, which hands the LED back to the EC,
+  so its normal on/off and its breathing in S0ix carry on. Overlapping
+  requests (the lock screen and an enroll) share the flash; it stops with
+  the last.
+- **A crash cannot leave it flashing for good.** An fpd that finds `timer`
+  already active refuses to guess the resting trigger unless
+  `--prompt-led-restore` names it, and then puts it back at once. The C14's
+  unit names it.
+- **Optional.** Without the flag fpd is unchanged, and an LED that cannot
+  be opened is a warning, not a failed start. The unit's sandbox makes /sys
+  read-only, so a machine that uses it adds a `ReadWritePaths=` for that
+  LED's directory in a drop-in (the C14's is in the thinkpad-c14
+  repository).
+
+The lock screen keeps a verify running while it is up, so there the LED
+flashes the whole time.
+
 ## Project conventions
 
 Per the owner's standards: Go modules with the version pinned in `go.mod`,
