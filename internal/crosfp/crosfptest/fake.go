@@ -34,6 +34,8 @@ type MCU struct {
 	Touches []Touch
 	// Fail makes the command fail with the result.
 	Fail map[uint32]crosfp.Result
+	// FailOnce makes the command's next call fail with the result.
+	FailOnce map[uint32]crosfp.Result
 	// UpdateOnMatch makes the next match report a template update.
 	UpdateOnMatch bool
 
@@ -95,6 +97,10 @@ func (m *MCU) Command(cmd, version uint32, out []byte, insize int) ([]byte, erro
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if r, ok := m.Fail[cmd]; ok {
+		return nil, r
+	}
+	if r, ok := m.FailOnce[cmd]; ok {
+		delete(m.FailOnce, cmd)
 		return nil, r
 	}
 	le := binary.LittleEndian

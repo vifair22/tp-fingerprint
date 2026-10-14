@@ -125,7 +125,16 @@ func derive(secret []byte, label string) [32]byte {
 // open brings the MCU up: the seed if it has none, then the templates.
 func (d *Device) open(ctx context.Context) error {
 	if d.mcu != nil && d.fresh {
-		return nil
+		// The MCU forgets its seed, context and templates when it
+		// reboots, which it does across a system suspend and on its own
+		// when idle. A request must not find that out halfway, where it
+		// surfaces as an error the lock screen counts against the
+		// password; one command says whether the state is still there.
+		if set, err := d.mcu.SeedSet(); err == nil && set {
+			return nil
+		}
+		d.cfg.Log.Info("the fingerprint MCU lost its state; reopening")
+		_ = d.fail(nil)
 	}
 	if d.mcu == nil {
 		t, err := d.cfg.Open(d.cfg.Path)
@@ -259,6 +268,21 @@ func (d *Device) owns(uid uint32) bool {
 	return false
 }
 
+// matchOnce is match with one reopen: a handle that went bad while the
+// MCU kept its seed fails at the first SetMode, before any touch, and a
+// fresh open and a second try then succeed instead of failing the request.
+func (d *Device) matchOnce(ctx context.Context, retry func()) (int, error) {
+	idx, err := d.match(ctx, retry)
+	if !errors.Is(err, server.ErrUnavailable) {
+		return idx, err
+	}
+	d.cfg.Log.Info("the fingerprint MCU did not answer; reopening", "err", err)
+	if err := d.open(ctx); err != nil {
+		return -1, err
+	}
+	return d.match(ctx, retry)
+}
+
 // match runs one match: the touch's template index, or -1 for no match.
 // retry is called for each unusable touch, which is tried again.
 func (d *Device) match(ctx context.Context, retry func()) (int, error) {
@@ -340,7 +364,7 @@ func (d *Device) Verify(ctx context.Context, uid uint32, prompt, retry func()) (
 		return false, server.ErrNotEnrolled
 	}
 	prompt()
-	idx, err := d.match(ctx, retry)
+	idx, err := d.matchOnce(ctx, retry)
 	if err != nil || idx < 0 {
 		return false, err
 	}
@@ -358,7 +382,7 @@ func (d *Device) Identify(ctx context.Context, prompt, retry func()) (server.Enr
 		return server.Enrolled{}, false, server.ErrNotEnrolled
 	}
 	prompt()
-	idx, err := d.match(ctx, retry)
+	idx, err := d.matchOnce(ctx, retry)
 	if err != nil || idx < 0 {
 		return server.Enrolled{}, false, err
 	}

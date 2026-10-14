@@ -224,6 +224,41 @@ func TestReloadAfterMCUReset(t *testing.T) {
 	}
 }
 
+func TestRebootWhileOpen(t *testing.T) {
+	d, mcu := setup(t)
+	enroll(t, d, mcu, 1000, 1, "a")
+	// The MCU rebooted under an open handle, as across a suspend: the
+	// request finds it out before scanning and reloads, so it succeeds.
+	mcu.Seed, mcu.Context, mcu.Templates = nil, nil, nil
+	mcu.Touches = append(mcu.Touches, crosfptest.Touch{Finger: "a"})
+	ok, err := d.Verify(context.Background(), 1000, func() {}, func() {})
+	if err != nil || !ok {
+		t.Fatalf("verify after a reboot under the handle: %v %v", ok, err)
+	}
+	mcu.Seed, mcu.Context, mcu.Templates = nil, nil, nil
+	mcu.Touches = append(mcu.Touches, crosfptest.Touch{Finger: "a"})
+	e, ok, err := d.Identify(context.Background(), func() {}, func() {})
+	if err != nil || !ok || e.UID != 1000 {
+		t.Fatalf("identify after a reboot under the handle: %v %v %v", e, ok, err)
+	}
+}
+
+func TestOneFailedModeIsRetried(t *testing.T) {
+	d, mcu := setup(t)
+	enroll(t, d, mcu, 1000, 1, "a")
+	mcu.FailOnce = map[uint32]crosfp.Result{0x0402: crosfp.Result(1)}
+	mcu.Touches = append(mcu.Touches, crosfptest.Touch{Finger: "a"})
+	ok, err := d.Verify(context.Background(), 1000, func() {}, func() {})
+	if err != nil || !ok {
+		t.Fatalf("verify after one failed SetMode: %v %v", ok, err)
+	}
+	// A sensor that keeps failing is still reported, after one retry.
+	mcu.Fail = map[uint32]crosfp.Result{0x0402: crosfp.Result(1)}
+	if _, err := d.Verify(context.Background(), 1000, func() {}, func() {}); !errors.Is(err, server.ErrUnavailable) {
+		t.Fatalf("err %v", err)
+	}
+}
+
 func TestForeignSeedIsReported(t *testing.T) {
 	d, mcu := setup(t)
 	enroll(t, d, mcu, 1000, 1, "a")
