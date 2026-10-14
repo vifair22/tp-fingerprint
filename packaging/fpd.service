@@ -1,13 +1,14 @@
-# fpd: owns the T480 fingerprint sensor and answers pam_fpd.so and fpctl.
+# fpd: owns the fingerprint sensor (the T480's USB sensor or the C14's
+# ChromeOS fingerprint MCU) and answers pam_fpd.so and fpctl.
 #
 # The sandbox gives it what it needs and nothing else: the USB device
-# nodes, its socket directory under /run, its state under /var/lib/fpd,
+# nodes or /dev/cros_fp, its socket directory under /run, its state under /var/lib/fpd,
 # read access to /proc and /run/systemd/sessions (for the remote-session
 # check), the system bus (fprintd's API for System Settings), and no
 # capabilities, since everything it opens is owned by root.
 
 [Unit]
-Description=Fingerprint daemon for the T480 sensor
+Description=Fingerprint daemon
 Documentation=https://git.airies.net/vifair22/t480-fingerprint
 After=systemd-udevd.service dbus.service
 
@@ -25,6 +26,7 @@ UMask=0077
 
 DevicePolicy=closed
 DeviceAllow=char-usb_device rw
+DeviceAllow=/dev/cros_fp rw
 CapabilityBoundingSet=
 AmbientCapabilities=
 NoNewPrivileges=yes
