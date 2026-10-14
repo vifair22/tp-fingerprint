@@ -164,3 +164,24 @@ func TestStartFprintWithoutABus(t *testing.T) {
 		t.Fatalf("log %q", logs.String())
 	}
 }
+
+func TestChooseSensor(t *testing.T) {
+	tests := []struct {
+		flag    string
+		present bool
+		want    string
+		bad     bool
+	}{
+		{"auto", true, "crosfp", false},
+		{"auto", false, "validity", false},
+		{"validity", true, "validity", false},
+		{"crosfp", false, "crosfp", false},
+		{"nonsense", true, "", true},
+	}
+	for _, tt := range tests {
+		got, err := chooseSensor(tt.flag, tt.present)
+		if (err != nil) != tt.bad || got != tt.want {
+			t.Errorf("chooseSensor(%q, %v) = %q, %v", tt.flag, tt.present, got, err)
+		}
+	}
+}

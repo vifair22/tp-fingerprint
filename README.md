@@ -1,8 +1,10 @@
 # t480-fingerprint
 
 Fingerprint authentication for the ThinkPad T480's Synaptics `06cb:009a`
-("Metallica") reader: a Go daemon that drives the sensor, a small C PAM
-module, and a CLI. It replaces the python-validity / open-fprintd /
+("Metallica") reader, and for the ThinkPad C14 Chromebook's ChromeOS
+fingerprint MCU: a Go daemon that drives the sensor, a small C PAM module,
+and a CLI. `fpd --sensor auto` (the default) picks the C14's MCU when
+`/dev/cros_fp` exists (see docs/DESIGN.md, "Second sensor"). It replaces the python-validity / open-fprintd /
 fprintd-clients stack with one program of our own.
 
 Status: working end to end on the T480 it was written for: the lock
