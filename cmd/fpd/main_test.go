@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"git.airies.net/vifair22/t480-fingerprint/internal/promptled"
 	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
 	"git.airies.net/vifair22/t480-fingerprint/internal/server"
 )
@@ -183,5 +184,100 @@ func TestChooseSensor(t *testing.T) {
 		if (err != nil) != tt.bad || got != tt.want {
 			t.Errorf("chooseSensor(%q, %v) = %q, %v", tt.flag, tt.present, got, err)
 		}
+	}
+}
+
+// promptingReader prompts, then reports what the LED's trigger was while
+// it waited.
+type promptingReader struct {
+	stubReader
+	dir  string
+	seen []string
+}
+
+func (p *promptingReader) look(prompt func()) {
+	prompt()
+	b, _ := os.ReadFile(filepath.Join(p.dir, "trigger"))
+	p.seen = append(p.seen, string(b))
+}
+
+func (p *promptingReader) Verify(_ context.Context, _ uint32, prompt, _ func()) (bool, error) {
+	p.look(prompt)
+	return true, nil
+}
+
+func (p *promptingReader) Identify(_ context.Context, prompt, _ func()) (server.Enrolled, bool, error) {
+	p.look(prompt)
+	return server.Enrolled{}, true, nil
+}
+
+func (p *promptingReader) Enroll(_ context.Context, _ uint32, _ uint16, prompt func(), _ func(int, error)) error {
+	p.look(prompt)
+	return nil
+}
+
+func TestLEDReaderFlashesWhileWaiting(t *testing.T) {
+	dir := t.TempDir()
+	for name, v := range map[string]string{
+		"trigger": "none [chromeos-auto] timer", "delay_on": "", "delay_off": "",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(v), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	led, err := promptled.Open(dir, "", slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := &promptingReader{dir: dir}
+	r := ledReader{reader: inner, led: led}
+	ctx := context.Background()
+	if _, err := r.Verify(ctx, 1000, func() {}, func() {}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.Identify(ctx, func() {}, func() {}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Enroll(ctx, 1000, 1, func() {}, func(int, error) {}); err != nil {
+		t.Fatal(err)
+	}
+	for i, s := range inner.seen {
+		if s != "timer" {
+			t.Fatalf("request %d: trigger %q while waiting", i, s)
+		}
+	}
+	if len(inner.seen) != 3 {
+		t.Fatalf("%d requests prompted", len(inner.seen))
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "trigger"))
+	if string(b) != "chromeos-auto" {
+		t.Fatalf("trigger %q after the requests", b)
+	}
+}
+
+func TestRunWithMissingPromptLED(t *testing.T) {
+	var out bytes.Buffer
+	// The LED is missing, which only warns; the socket is a regular file,
+	// which stops the run before it serves.
+	file := filepath.Join(t.TempDir(), "notasocket")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code := run([]string{"--sensor", "crosfp", "--no-dbus", "--socket", file,
+		"--prompt-led", filepath.Join(t.TempDir(), "absent")}, &out)
+	if code != 1 || !strings.Contains(out.String(), "no prompt LED") {
+		t.Fatalf("code %d, log %q", code, out.String())
+	}
+
+	// A present LED is taken, and its trigger put back on the way out.
+	led := t.TempDir()
+	if err := os.WriteFile(filepath.Join(led, "trigger"), []byte("[none] timer"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	code = run([]string{"--sensor", "crosfp", "--no-dbus", "--socket", file, "--prompt-led", led}, &out)
+	b, _ := os.ReadFile(filepath.Join(led, "trigger"))
+	if code != 1 || !strings.Contains(out.String(), "prompt LED") || string(b) != "none" {
+		t.Fatalf("code %d, trigger %q, log %q", code, b, out.String())
 	}
 }

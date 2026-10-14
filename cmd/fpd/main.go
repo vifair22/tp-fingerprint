@@ -26,6 +26,7 @@ import (
 	"git.airies.net/vifair22/t480-fingerprint/internal/device"
 	"git.airies.net/vifair22/t480-fingerprint/internal/fprint"
 	"git.airies.net/vifair22/t480-fingerprint/internal/hostid"
+	"git.airies.net/vifair22/t480-fingerprint/internal/promptled"
 	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
 	"git.airies.net/vifair22/t480-fingerprint/internal/server"
 	"git.airies.net/vifair22/t480-fingerprint/internal/trust"
@@ -34,7 +35,8 @@ import (
 	"git.airies.net/vifair22/t480-fingerprint/internal/version"
 )
 
-const usage = `usage: fpd [--sensor auto|validity|crosfp] [--socket PATH] [--secret PATH] [--calib PATH] [--idle DURATION] [--no-dbus] [--debug]
+const usage = `usage: fpd [--sensor auto|validity|crosfp] [--socket PATH] [--secret PATH] [--calib PATH] [--idle DURATION]
+           [--prompt-led NAME [--prompt-led-restore TRIGGER]] [--no-dbus] [--debug]
 
 Owns the fingerprint sensor and serves requests on a unix socket. Runs as
 root; callers are authorised by their socket credentials.
@@ -48,6 +50,13 @@ root; callers are authorised by their socket credentials.
   --idle DURATION how long the sensor stays awake after a request before
                   USB may suspend it (default 30s); a suspended sensor
                   costs the next request a fresh session, about a second
+  --prompt-led NAME
+                  flash this LED (a name under ` + promptled.ClassDir + `, or a path)
+                  while the sensor waits for a finger; needs the kernel's
+                  ledtrig-timer
+  --prompt-led-restore TRIGGER
+                  the LED's trigger when nothing waits (default: the one
+                  active at start)
   --no-dbus       do not serve fprintd's D-Bus API (System Settings enrollment)
   --debug         log every sensor command and reply
   --version       print the version
@@ -67,6 +76,8 @@ func run(args []string, stderr io.Writer) int {
 	debug := fs.Bool("debug", false, "")
 	idle := fs.Duration("idle", device.DefaultIdleGrace, "")
 	noDBus := fs.Bool("no-dbus", false, "")
+	ledName := fs.String("prompt-led", "", "")
+	ledRestore := fs.String("prompt-led-restore", "", "")
 	showVersion := fs.Bool("version", false, "")
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
 		if errors.Is(err, flag.ErrHelp) {
@@ -103,6 +114,21 @@ func run(args []string, stderr io.Writer) int {
 		})
 	}
 	log.Info("sensor", "kind", kind)
+	if *ledName != "" {
+		led, err := promptled.Open(promptled.Path(*ledName), *ledRestore, log)
+		if err != nil {
+			// Not fatal: the light is a convenience, the sensor is not.
+			log.Warn("no prompt LED", "err", err)
+		} else {
+			log.Info("prompt LED", "led", *ledName)
+			dev = ledReader{reader: dev, led: led}
+			defer func() {
+				if err := led.Restore(); err != nil {
+					log.Warn("cannot restore the prompt LED", "err", err)
+				}
+			}()
+		}
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	var bus busStarter
@@ -136,6 +162,30 @@ type reader interface {
 	server.Reader
 	Warm() error
 	Close() error
+}
+
+// ledReader flashes the prompt LED while a request waits for a finger.
+type ledReader struct {
+	reader
+	led *promptled.LED
+}
+
+func (r ledReader) Verify(ctx context.Context, uid uint32, prompt, retry func()) (bool, error) {
+	p, done := r.led.Prompt(prompt)
+	defer done()
+	return r.reader.Verify(ctx, uid, p, retry)
+}
+
+func (r ledReader) Identify(ctx context.Context, prompt, retry func()) (server.Enrolled, bool, error) {
+	p, done := r.led.Prompt(prompt)
+	defer done()
+	return r.reader.Identify(ctx, p, retry)
+}
+
+func (r ledReader) Enroll(ctx context.Context, uid uint32, subtype uint16, prompt func(), progress func(int, error)) error {
+	p, done := r.led.Prompt(prompt)
+	defer done()
+	return r.reader.Enroll(ctx, uid, subtype, p, progress)
 }
 
 // serve listens on socket and serves until ctx ends, then shuts the
