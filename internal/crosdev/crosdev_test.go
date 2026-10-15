@@ -383,3 +383,24 @@ func TestPresent(t *testing.T) {
 		t.Error("/dev/null not a character device")
 	}
 }
+
+func TestSensorSleepsBetweenRequests(t *testing.T) {
+	d, mcu := setup(t)
+	if err := d.Warm(); err != nil {
+		t.Fatal(err)
+	}
+	if mcu.Mode != crosfp.ModeDeepSleep {
+		t.Fatalf("after warm: mode %#x, want deep sleep", mcu.Mode)
+	}
+	enroll(t, d, mcu, 1000, 1, "a")
+	if mcu.Mode != crosfp.ModeDeepSleep {
+		t.Fatalf("after enroll: mode %#x, want deep sleep", mcu.Mode)
+	}
+	mcu.Touches = append(mcu.Touches, crosfptest.Touch{Finger: "a"})
+	if ok, err := d.Verify(context.Background(), 1000, func() {}, func() {}); err != nil || !ok {
+		t.Fatalf("verify: %v %v", ok, err)
+	}
+	if mcu.Mode != crosfp.ModeDeepSleep {
+		t.Fatalf("after verify: mode %#x, want deep sleep", mcu.Mode)
+	}
+}

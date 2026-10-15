@@ -346,10 +346,13 @@ func (d *Device) liftFinger(ctx context.Context) {
 	_, _ = d.mcu.Wait(wctx, crosfp.EventFingerUp)
 }
 
-// idle takes the MCU out of any mode, so it sleeps between requests.
+// idle puts the sensor into deep sleep between requests, as ChromeOS's
+// biod does. With no mode at all the MCU idles but the sensor stays
+// powered, and it stays so through S0ix, where it was the one device left
+// to trim (the C14 measured 0.26 W asleep).
 func (d *Device) idle() {
 	if d.mcu != nil {
-		_, _ = d.mcu.SetMode(0)
+		_, _ = d.mcu.SetMode(crosfp.ModeDeepSleep)
 	}
 }
 
@@ -513,7 +516,13 @@ func (d *Device) Delete(uid uint32, subtype uint16) error {
 func (d *Device) Warm() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.open(context.Background())
+	if err := d.open(context.Background()); err != nil {
+		return err
+	}
+	// Opening leaves the MCU in no mode; sleep the sensor until the
+	// first request.
+	d.idle()
+	return nil
 }
 
 // Close implements fpd's reader.
