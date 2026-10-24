@@ -18,7 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/atomicfile"
+	"git.airies.net/vifair22/tp-fingerprint/internal/atomicfile"
 )
 
 // The driver package and its pinned hash, from python-validity's

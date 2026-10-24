@@ -1,4 +1,4 @@
-# t480-fingerprint design
+# tp-fingerprint design
 
 Status: **installed locally; fingerprint unlocks the lock screen and
 1Password, and enrolls from System Settings**

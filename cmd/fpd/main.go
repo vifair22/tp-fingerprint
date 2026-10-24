@@ -21,18 +21,18 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/crosdev"
-	"git.airies.net/vifair22/t480-fingerprint/internal/crosfp"
-	"git.airies.net/vifair22/t480-fingerprint/internal/device"
-	"git.airies.net/vifair22/t480-fingerprint/internal/fprint"
-	"git.airies.net/vifair22/t480-fingerprint/internal/hostid"
-	"git.airies.net/vifair22/t480-fingerprint/internal/promptled"
-	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
-	"git.airies.net/vifair22/t480-fingerprint/internal/server"
-	"git.airies.net/vifair22/t480-fingerprint/internal/trust"
-	"git.airies.net/vifair22/t480-fingerprint/internal/usbfs"
-	"git.airies.net/vifair22/t480-fingerprint/internal/validity"
-	"git.airies.net/vifair22/t480-fingerprint/internal/version"
+	"git.airies.net/vifair22/tp-fingerprint/internal/crosdev"
+	"git.airies.net/vifair22/tp-fingerprint/internal/crosfp"
+	"git.airies.net/vifair22/tp-fingerprint/internal/device"
+	"git.airies.net/vifair22/tp-fingerprint/internal/fprint"
+	"git.airies.net/vifair22/tp-fingerprint/internal/hostid"
+	"git.airies.net/vifair22/tp-fingerprint/internal/promptled"
+	"git.airies.net/vifair22/tp-fingerprint/internal/proto"
+	"git.airies.net/vifair22/tp-fingerprint/internal/server"
+	"git.airies.net/vifair22/tp-fingerprint/internal/trust"
+	"git.airies.net/vifair22/tp-fingerprint/internal/usbfs"
+	"git.airies.net/vifair22/tp-fingerprint/internal/validity"
+	"git.airies.net/vifair22/tp-fingerprint/internal/version"
 )
 
 const usage = `usage: fpd [--sensor auto|validity|crosfp] [--socket PATH] [--secret PATH] [--calib PATH] [--idle DURATION]

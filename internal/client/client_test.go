@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
+	"git.airies.net/vifair22/tp-fingerprint/internal/proto"
 )
 
 // fake serves one connection with the given frames after reading a request.

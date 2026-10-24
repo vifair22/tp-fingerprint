@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/crosfp"
-	"git.airies.net/vifair22/t480-fingerprint/internal/crosfp/crosfptest"
-	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
-	"git.airies.net/vifair22/t480-fingerprint/internal/server"
+	"git.airies.net/vifair22/tp-fingerprint/internal/crosfp"
+	"git.airies.net/vifair22/tp-fingerprint/internal/crosfp/crosfptest"
+	"git.airies.net/vifair22/tp-fingerprint/internal/proto"
+	"git.airies.net/vifair22/tp-fingerprint/internal/server"
 )
 
 func setup(t *testing.T) (*Device, *crosfptest.MCU) {

@@ -1,9 +1,9 @@
-# Build, test and lint t480-fingerprint: the Go programs (fpd, fpctl) and
+# Build, test and lint tp-fingerprint: the Go programs (fpd, fpctl) and
 # the C PAM module. Everything generated lands under build/: binaries in
 # build/bin, the module in build/lib, coverage data in build/coverage.
 
 GO        ?= go
-PKG       := git.airies.net/vifair22/t480-fingerprint
+PKG       := git.airies.net/vifair22/tp-fingerprint
 SEMVER    := $(shell cat release_version)
 STAMP     := $(shell date +%Y%m%d.%H%M)
 BIN       := build/bin

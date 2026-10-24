@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"strings"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/atomicfile"
+	"git.airies.net/vifair22/tp-fingerprint/internal/atomicfile"
 )
 
 // Default locations.

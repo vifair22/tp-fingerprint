@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
+	"git.airies.net/vifair22/tp-fingerprint/internal/proto"
 )
 
 // fakeReader scripts the sensor: each Verify/Identify consumes the next

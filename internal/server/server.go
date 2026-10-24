@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
+	"git.airies.net/vifair22/tp-fingerprint/internal/proto"
 )
 
 // Enrolled is one enrolled finger.

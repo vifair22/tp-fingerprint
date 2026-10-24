@@ -9,7 +9,7 @@
 
 [Unit]
 Description=Fingerprint daemon
-Documentation=https://git.airies.net/vifair22/t480-fingerprint
+Documentation=https://git.airies.net/vifair22/tp-fingerprint
 After=systemd-udevd.service dbus.service
 
 [Service]

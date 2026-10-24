@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/usbfs"
+	"git.airies.net/vifair22/tp-fingerprint/internal/usbfs"
 )
 
 const (

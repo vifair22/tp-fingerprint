@@ -20,15 +20,15 @@ import (
 	"syscall"
 	"time"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/atomicfile"
-	"git.airies.net/vifair22/t480-fingerprint/internal/client"
-	"git.airies.net/vifair22/t480-fingerprint/internal/fwfetch"
-	"git.airies.net/vifair22/t480-fingerprint/internal/hostid"
-	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
-	"git.airies.net/vifair22/t480-fingerprint/internal/trust"
-	"git.airies.net/vifair22/t480-fingerprint/internal/usbfs"
-	"git.airies.net/vifair22/t480-fingerprint/internal/validity"
-	"git.airies.net/vifair22/t480-fingerprint/internal/version"
+	"git.airies.net/vifair22/tp-fingerprint/internal/atomicfile"
+	"git.airies.net/vifair22/tp-fingerprint/internal/client"
+	"git.airies.net/vifair22/tp-fingerprint/internal/fwfetch"
+	"git.airies.net/vifair22/tp-fingerprint/internal/hostid"
+	"git.airies.net/vifair22/tp-fingerprint/internal/proto"
+	"git.airies.net/vifair22/tp-fingerprint/internal/trust"
+	"git.airies.net/vifair22/tp-fingerprint/internal/usbfs"
+	"git.airies.net/vifair22/tp-fingerprint/internal/validity"
+	"git.airies.net/vifair22/tp-fingerprint/internal/version"
 )
 
 // sensor is an open sensor handle: something to run transfers over and to

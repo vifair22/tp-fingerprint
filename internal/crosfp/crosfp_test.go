@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/crosfp"
-	"git.airies.net/vifair22/t480-fingerprint/internal/crosfp/crosfptest"
+	"git.airies.net/vifair22/tp-fingerprint/internal/crosfp"
+	"git.airies.net/vifair22/tp-fingerprint/internal/crosfp/crosfptest"
 )
 
 func TestResultError(t *testing.T) {

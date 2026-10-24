@@ -1,4 +1,4 @@
-# t480-fingerprint
+# tp-fingerprint
 
 Fingerprint authentication for the ThinkPad T480's Synaptics `06cb:009a`
 ("Metallica") reader, and for the ThinkPad C14 Chromebook's ChromeOS

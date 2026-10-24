@@ -17,13 +17,13 @@ import (
 	"sync"
 	"time"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/atomicfile"
-	"git.airies.net/vifair22/t480-fingerprint/internal/hostid"
-	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
-	"git.airies.net/vifair22/t480-fingerprint/internal/server"
-	"git.airies.net/vifair22/t480-fingerprint/internal/trust"
-	"git.airies.net/vifair22/t480-fingerprint/internal/usbfs"
-	"git.airies.net/vifair22/t480-fingerprint/internal/validity"
+	"git.airies.net/vifair22/tp-fingerprint/internal/atomicfile"
+	"git.airies.net/vifair22/tp-fingerprint/internal/hostid"
+	"git.airies.net/vifair22/tp-fingerprint/internal/proto"
+	"git.airies.net/vifair22/tp-fingerprint/internal/server"
+	"git.airies.net/vifair22/tp-fingerprint/internal/trust"
+	"git.airies.net/vifair22/tp-fingerprint/internal/usbfs"
+	"git.airies.net/vifair22/tp-fingerprint/internal/validity"
 )
 
 // sensor is what Device uses of an opened sensor: the database and the

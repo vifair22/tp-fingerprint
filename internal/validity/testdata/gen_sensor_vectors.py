@@ -4,7 +4,7 @@
 Run from a python-validity checkout (a6bbc21, release 0.15):
 
     cd ~/git/home/python-validity
-    python3 <this file> > <t480-fingerprint>/internal/validity/testdata/sensor_vectors.json
+    python3 <this file> > <tp-fingerprint>/internal/validity/testdata/sensor_vectors.json
 
 pyusb is stubbed out; nothing touches hardware. The inputs (factory values,
 raw frames) are pseudo-random from a fixed seed, so the file is

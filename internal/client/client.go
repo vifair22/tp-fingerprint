@@ -8,7 +8,7 @@ import (
 	"net"
 	"syscall"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
+	"git.airies.net/vifair22/tp-fingerprint/internal/proto"
 )
 
 // ErrNoDaemon means nothing is listening on the socket: fpd is not

@@ -15,7 +15,7 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/server"
+	"git.airies.net/vifair22/tp-fingerprint/internal/server"
 )
 
 // privateBus starts a dbus-daemon of our own and returns its address.

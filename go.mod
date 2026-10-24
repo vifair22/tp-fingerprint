@@ -1,4 +1,4 @@
-module git.airies.net/vifair22/t480-fingerprint
+module git.airies.net/vifair22/tp-fingerprint
 
 go 1.26
 

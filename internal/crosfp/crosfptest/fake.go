@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"sync"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/crosfp"
+	"git.airies.net/vifair22/tp-fingerprint/internal/crosfp"
 )
 
 // Touch is one scripted finger on the sensor. Finger names whose print it

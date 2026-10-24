@@ -19,8 +19,8 @@ import (
 	"github.com/godbus/dbus/v5/introspect"
 	"github.com/godbus/dbus/v5/prop"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/server"
-	"git.airies.net/vifair22/t480-fingerprint/internal/validity"
+	"git.airies.net/vifair22/tp-fingerprint/internal/server"
+	"git.airies.net/vifair22/tp-fingerprint/internal/validity"
 )
 
 // Bus names and paths, as fprintd uses them.

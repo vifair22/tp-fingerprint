@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"git.airies.net/vifair22/t480-fingerprint/internal/promptled"
-	"git.airies.net/vifair22/t480-fingerprint/internal/proto"
-	"git.airies.net/vifair22/t480-fingerprint/internal/server"
+	"git.airies.net/vifair22/tp-fingerprint/internal/promptled"
+	"git.airies.net/vifair22/tp-fingerprint/internal/proto"
+	"git.airies.net/vifair22/tp-fingerprint/internal/server"
 )
 
 type stubReader struct {
